@@ -1,0 +1,33 @@
+# 复制为 mcp.yml 后重启服务,即可挂载 MCP 工具。
+# 每个 server 一条 insert;工具会以 mcp__<serverName>__<tool> 出现在模型工具列表。
+- insert:
+    # stdio:本地 MCP 进程。示例使用官方 memory server,不需要 token。
+    - id: mcp-memory
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: memory
+        transport: stdio
+        command: npx
+        args: ['-y', '@modelcontextprotocol/server-memory']
+        failOnStartupError: false
+
+    # 需要 GitHub MCP 时取消注释,并在启动 uvicorn 前 export GITHUB_TOKEN。
+    # - id: mcp-github
+    #   name: '@deepseek-ai/dsh-mcp-client'
+    #   config:
+    #     serverName: github
+    #     transport: stdio
+    #     command: npx
+    #     args: ['-y', '@modelcontextprotocol/server-github']
+    #     env:
+    #       GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN
+
+    # Streamable HTTP MCP server 示例。
+    # - id: mcp-web
+    #   name: '@deepseek-ai/dsh-mcp-client'
+    #   config:
+    #     serverName: web
+    #     transport: streamable-http
+    #     url: http://127.0.0.1:3000/mcp
+    #     headers:
+    #       Authorization: !!js '`Bearer ${process.env.MCP_TOKEN}`'

@@ -2,6 +2,8 @@
 
 基于 `deepseek-harness` SDK 的一个最小可用的 Agent Web 平台:多会话聊天界面 + SSE 流式事件推送(工具调用、推理、最终回复)。
 
+**深入阅读:** [配置与原理](docs/configuration-and-internals.md) — skill、MCP、流式、workflow、停止、轨迹的实现细节。
+
 ## 结构
 
 ```
