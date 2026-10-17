@@ -1,12 +1,15 @@
 import { useEffect, useRef } from "react";
-import type { TrajectoryEvent } from "../types";
+import type { AgentSpecInfo, TrajectoryEvent } from "../types";
 
 interface TrajectoryDockProps {
   open: boolean;
   events: TrajectoryEvent[];
+  agents: AgentSpecInfo[];
 }
 
-const AGENT_LABEL = { coder: "Coder", reviewer: "Reviewer" } as const;
+function agentName(agents: AgentSpecInfo[], id?: string): string {
+  return id ? agents.find((agent) => agent.id === id)?.name ?? id : "Assistant";
+}
 
 interface Row {
   key: string;
@@ -31,13 +34,14 @@ function fmtDuration(ms: number | undefined): string {
 }
 
 function phaseText(stage: string | undefined, round: number | undefined): string {
-  if (stage === "start") return "开始编码";
+  if (stage === "start") return "开始";
   if (stage === "fix") return `第 ${round ?? 0} 轮修复`;
   if (stage === "review") return "审查中";
+  if (stage === "done") return "已完成";
   return stage || "";
 }
 
-function buildRows(events: TrajectoryEvent[]): Row[] {
+function buildRows(events: TrajectoryEvent[], agents: AgentSpecInfo[]): Row[] {
   const rows: Row[] = [];
   const calls = new Map<string, { ts: number; name: string }>();
   let turnStart = 0;
@@ -106,7 +110,7 @@ function buildRows(events: TrajectoryEvent[]): Row[] {
           key,
           ts: event.ts,
           icon: "💬",
-          label: event.agent ? AGENT_LABEL[event.agent] : "Assistant",
+          label: agentName(agents, event.agent),
           text: event.text,
           tone: "assistant",
           indent: event.scope === "child" ? 2 : 1,
@@ -139,7 +143,7 @@ function buildRows(events: TrajectoryEvent[]): Row[] {
           key,
           ts: event.ts,
           icon: "🧩",
-          label: `${event.agent ? AGENT_LABEL[event.agent] : "Agent"} · ${phaseText(event.stage, event.round)}`,
+          label: `${agentName(agents, event.agent)} · ${phaseText(event.stage, event.round)}`,
           tone: "phase",
         });
         break;
@@ -232,9 +236,9 @@ function buildRows(events: TrajectoryEvent[]): Row[] {
   return rows;
 }
 
-export function TrajectoryDock({ open, events }: TrajectoryDockProps) {
+export function TrajectoryDock({ open, events, agents }: TrajectoryDockProps) {
   const ref = useRef<HTMLElement>(null);
-  const rows = buildRows(events);
+  const rows = buildRows(events, agents);
   const turns = events.filter((e) => e.type === "turn_start").length;
   const steps = events.filter((e) => e.type === "step_start").length;
   const tools = events.filter((e) => e.type === "tool_call").length;

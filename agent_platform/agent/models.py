@@ -23,6 +23,8 @@ class Chat:
     # 团队模式的角色会话 id(coder / reviewer 各自独立上下文,可跨轮复用)
     coder_sid: str | None = None
     reviewer_sid: str | None = None
+    # 流水线模式:每个阶段角色一个独立会话,按 agent id 复用
+    agent_sids: dict[str, str] = field(default_factory=dict)
     # 团队 lead(路由/直答)会话;和 coder/reviewer 分开,避免内部 JSON 污染角色上下文
     lead_sid: str | None = None
     # 本 chat 见过的 runtime session id(含 subagent 子会话),用于把审批请求路由回正确会话

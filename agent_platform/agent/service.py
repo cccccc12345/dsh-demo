@@ -473,12 +473,17 @@ class AgentService:
             with self._chats_lock:
                 chats = list(self._chats.values())
             for chat in chats:
-                if session_id in {
-                    chat.runtime_sid,
-                    chat.coder_sid,
-                    chat.reviewer_sid,
-                    chat.lead_sid,
-                } or session_id in chat.session_ids:
+                if (
+                    session_id
+                    in {
+                        chat.runtime_sid,
+                        chat.coder_sid,
+                        chat.reviewer_sid,
+                        chat.lead_sid,
+                    }
+                    or session_id in chat.agent_sids.values()
+                    or session_id in chat.session_ids
+                ):
                     return chat.id
         with self._approvals_lock:
             active = list(self._active_turns)
@@ -544,7 +549,7 @@ class AgentService:
             self._active_turns[chat_id] = events
         if self.mock_mode or harness is None:
             run: Callable[[], None] = (
-                partial(run_mock_team_turn, text, chat, events)
+                partial(run_mock_team_turn, text, chat, events, self.workflow)
                 if team
                 else partial(run_mock_turn, text, chat, events)
             )

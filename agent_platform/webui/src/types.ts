@@ -12,6 +12,7 @@ export interface WorkflowInfo {
   id: string;
   name: string;
   description: string;
+  type?: "review" | "pipeline";
   maxRounds: number;
   agents: AgentSpecInfo[];
 }
@@ -57,7 +58,7 @@ export interface TranscriptEntry {
   role: "user" | "assistant" | "system";
   text: string;
   ts: number;
-  agent?: "coder" | "reviewer";
+  agent?: string;
 }
 
 /** 后端 SSE 事件词汇表(见 translate_notification + mock 剧本) */
@@ -95,13 +96,15 @@ export interface TurnEvent {
   reasoning?: string;
   title?: string;
   isError?: boolean;
-  agent?: "coder" | "reviewer";
+  agent?: string;
   scope?: "child";
+  index?: number;
+  total?: number;
   child?: string;
   status?: string;
   stop?: string;
   summary?: string;
-  stage?: "start" | "fix" | "review";
+  stage?: "start" | "fix" | "review" | "done";
   round?: number;
   verdict?: "APPROVE" | "NEEDS_CHANGES";
   response?: string;
@@ -136,8 +139,8 @@ export interface PendingApproval {
   timeoutSeconds?: number;
 }
 
-/** Agent 角色标签 */
-export type AgentName = "coder" | "reviewer";
+/** Agent 角色标签(由 workflow.agents 动态决定) */
+export type AgentName = string;
 
 /** 流式界面里的一个内容块(判别联合,渲染时按 kind 收窄) */
 interface BlockBase {
@@ -208,13 +211,14 @@ export interface ChildGroup {
   open: boolean;
 }
 
+export interface TeamStage {
+  stage?: string;
+  round?: number;
+  text?: string;
+}
+
 /** 团队面板数据(由 phase / verdict / agent 消息驱动) */
 export interface TeamPanel {
-  coderStage?: string;
-  coderRound?: number;
-  reviewerStage?: string;
-  reviewerRound?: number;
-  coderText?: string;
-  reviewerText?: string;
+  stages: Record<string, TeamStage>;
   timeline: { verdict: string; round: number }[];
 }

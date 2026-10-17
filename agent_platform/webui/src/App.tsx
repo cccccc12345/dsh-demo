@@ -8,9 +8,23 @@ import { TeamDock } from "./components/TeamDock";
 import { TopBar } from "./components/TopBar";
 import { TrajectoryDock } from "./components/TrajectoryDock";
 import { useTheme } from "./lib/theme";
-import type { Block, ChatSummary, ChildGroup, ConfigInfo, PendingApproval, TeamPanel, TrajectoryEvent, TranscriptEntry, TurnEvent } from "./types";
+import type { AgentSpecInfo, Block, ChatSummary, ChildGroup, ConfigInfo, PendingApproval, TeamPanel, TrajectoryEvent, TranscriptEntry, TurnEvent } from "./types";
 
-const AGENT_LABEL = { coder: "👨‍💻 Coder", reviewer: "🔍 Reviewer" } as const;
+function agentView(agents: AgentSpecInfo[], id?: string) {
+  const found = id ? agents.find((agent) => agent.id === id) : undefined;
+  return {
+    emoji: found?.emoji ?? "🤖",
+    name: found?.name ?? id ?? "Agent",
+  };
+}
+
+function markAllStagesDone(panel: TeamPanel | null): TeamPanel | null {
+  if (!panel) return panel;
+  const stages = Object.fromEntries(
+    Object.entries(panel.stages).map(([id, stage]) => [id, { ...stage, stage: "done" }]),
+  );
+  return { ...panel, stages };
+}
 
 interface TurnState {
   blocks: Block[];
@@ -49,11 +63,11 @@ function saveTrajectory(chatId: string, events: TrajectoryEvent[]): void {
 }
 
 function phaseStageLabel(stage: string | undefined, round: number | undefined): string {
-  return stage === "start"
-    ? "开始编码"
-    : stage === "fix"
-      ? `第 ${round} 轮修复`
-      : "审查中";
+  if (stage === "start") return "运行中";
+  if (stage === "fix") return `第 ${round ?? 0} 轮修复`;
+  if (stage === "review") return "审查中";
+  if (stage === "done") return "已完成";
+  return "处理中";
 }
 
 function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
@@ -67,6 +81,7 @@ interface ReduceCtx {
   setStatus: (s: string) => void;
   onTeamPanel: (fn: (p: TeamPanel | null) => TeamPanel | null) => void;
   openDock: () => void;
+  agents: AgentSpecInfo[];
 }
 
 function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
@@ -237,10 +252,14 @@ function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
           scope: ev.scope,
         };
         if (ev.agent) {
-          ctx.onTeamPanel((p) => ({
-            ...(p ?? { timeline: [] }),
-            [ev.agent === "coder" ? "coderText" : "reviewerText"]: text,
-          }));
+          ctx.onTeamPanel((p) => {
+            const base = p ?? { stages: {}, timeline: [] };
+            const previous = base.stages[ev.agent!] ?? {};
+            return {
+              ...base,
+              stages: { ...base.stages, [ev.agent!]: { ...previous, text } },
+            };
+          });
         }
       } else if (ev.agent) {
         const idx = blocks.findIndex((b) => b.kind === "message" && b.agent === ev.agent);
@@ -248,10 +267,14 @@ function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
           const cur = blocks[idx];
           if (cur.kind === "message") blocks[idx] = { ...cur, text: ev.text ?? "" };
         } else blocks.push({ kind: "message", text: ev.text ?? "", agent: ev.agent });
-        ctx.onTeamPanel((p) => ({
-          ...(p ?? { timeline: [] }),
-          [ev.agent === "coder" ? "coderText" : "reviewerText"]: ev.text ?? "",
-        }));
+        ctx.onTeamPanel((p) => {
+          const base = p ?? { stages: {}, timeline: [] };
+          const previous = base.stages[ev.agent!] ?? {};
+          return {
+            ...base,
+            stages: { ...base.stages, [ev.agent!]: { ...previous, text: ev.text ?? "" } },
+          };
+        });
       } else {
         const idx = blocks.findIndex((b) => b.kind === "message" && !b.agent);
         if (idx >= 0) {
@@ -281,25 +304,42 @@ function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
 
     case "phase": {
       blocks.push({ kind: "phase", agent: ev.agent, stage: ev.stage, round: ev.round });
-      ctx.setStatus(`${AGENT_LABEL[ev.agent || "coder"]} ${phaseStageLabel(ev.stage, ev.round)}…`);
+      const view = agentView(ctx.agents, ev.agent);
+      ctx.setStatus(`${view.emoji} ${view.name} · ${phaseStageLabel(ev.stage, ev.round)}…`);
       ctx.openDock();
-      ctx.onTeamPanel((p) => ({
-        ...(p ?? { timeline: [] }),
-        [ev.agent === "reviewer" ? "reviewerStage" : "coderStage"]: ev.stage,
-        [ev.agent === "reviewer" ? "reviewerRound" : "coderRound"]: ev.round,
-      }));
+      if (ev.agent) {
+        const agentId = ev.agent;
+        ctx.onTeamPanel((p) => {
+          const base = p ?? { stages: {}, timeline: [] };
+          const previous = base.stages[agentId] ?? {};
+          return {
+            ...base,
+            stages: {
+              ...base.stages,
+              [agentId]: { ...previous, stage: ev.stage, round: ev.round },
+            },
+          };
+        });
+      }
       break;
     }
 
     case "verdict": {
       blocks.push({ kind: "verdict", verdict: ev.verdict, round: ev.round });
       ctx.setStatus(ev.verdict === "APPROVE" ? "✅ Reviewer 通过" : `🔁 Reviewer 打回(第 ${ev.round} 轮)`);
-      ctx.onTeamPanel((p) => ({
-        ...(p ?? { timeline: [] }),
-        reviewerStage: "done",
-        timeline: [...(p?.timeline ?? []), { verdict: ev.verdict || "", round: ev.round ?? 0 }],
-        [ev.verdict === "NEEDS_CHANGES" ? "coderStage" : "coderStage"]: ev.verdict === "NEEDS_CHANGES" ? undefined : "done",
-      }));
+      ctx.onTeamPanel((p) => {
+        const base = p ?? { stages: {}, timeline: [] };
+        const stages = { ...base.stages };
+        if (stages.reviewer) stages.reviewer = { ...stages.reviewer, stage: "done" };
+        if (ev.verdict !== "NEEDS_CHANGES" && stages.coder) {
+          stages.coder = { ...stages.coder, stage: "done" };
+        }
+        return {
+          ...base,
+          stages,
+          timeline: [...base.timeline, { verdict: ev.verdict || "", round: ev.round ?? 0 }],
+        };
+      });
       break;
     }
 
@@ -338,7 +378,7 @@ function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
           if (block.kind === "message" && !block.text) blocks.splice(i, 1);
         }
         blocks.push({ kind: "note", text: "⏹️ 已停止全部任务" });
-        ctx.onTeamPanel((p) => (p ? { ...p, coderStage: "done", reviewerStage: "done" } : p));
+        ctx.onTeamPanel(markAllStagesDone);
         break;
       }
       const hasMain = blocks.some((b) => b.kind === "message" && !b.agent);
@@ -349,7 +389,7 @@ function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
         if (emptyIdx >= 0) blocks[emptyIdx] = { kind: "note", text: "(本轮没有文本回复,详见会话记录)" };
         else if (!hasMain) blocks.push({ kind: "note", text: "(本轮没有文本回复,详见会话记录)" });
       }
-      ctx.onTeamPanel((p) => (p ? { ...p, coderStage: p.coderStage === "done" ? p.coderStage : "done", reviewerStage: p.reviewerStage === "done" ? p.reviewerStage : "done" } : p));
+      ctx.onTeamPanel(markAllStagesDone);
       break;
     }
   }
@@ -481,7 +521,7 @@ export default function App() {
       setRunning(true);
       setStatus("Agent 启动中…");
       if (teamReq) {
-        setTeam({ timeline: [] });
+        setTeam({ stages: {}, timeline: [] });
         setDockTab("team");
         setDockOpen(true);
       }
@@ -531,6 +571,7 @@ export default function App() {
             setStatus,
             onTeamPanel: setTeam,
             openDock: () => setDockOpen(true),
+            agents: config?.workflow?.agents ?? [],
           }),
         );
       };
@@ -558,7 +599,7 @@ export default function App() {
         }
       }
     },
-    [chats, showToast],
+    [chats, config, showToast],
   );
 
   const handleSend = useCallback(
@@ -652,22 +693,33 @@ export default function App() {
           entries={entries}
           blocks={turn.blocks}
           childGroups={turn.children}
+          agents={config?.workflow?.agents ?? []}
           running={running}
           emptyHint={
             config?.mock
               ? "服务运行在 Mock 模式,发送一条消息体验交互流程。"
               : active
-                ? "给 agent 布置一个任务;工程师+审查员随时待命。"
+                ? "给 agent 布置一个任务;团队工作流随时待命。"
                 : "先在左侧新建一个会话,或点击＋开始。"
           }
         />
         <ApprovalBar approvals={approvals} onDecide={(id, decision) => void decideApproval(id, decision)} />
-        <Composer disabled={!activeId && !connError && !config} running={running} onSubmit={handleSend} team={team} />
+        <Composer
+          disabled={!activeId && !connError && !config}
+          running={running}
+          onSubmit={handleSend}
+          team={team}
+          workflow={config?.workflow ?? null}
+        />
       </main>
       {dockTab === "team" ? (
-        <TeamDock open={dockOpen} data={team} />
+        <TeamDock open={dockOpen} data={team} agents={config?.workflow?.agents ?? []} />
       ) : (
-        <TrajectoryDock open={dockOpen} events={trajectory} />
+        <TrajectoryDock
+          open={dockOpen}
+          events={trajectory}
+          agents={config?.workflow?.agents ?? []}
+        />
       )}
       {notice && <div className="toast">{notice.text}</div>}
     </div>

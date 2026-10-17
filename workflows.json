@@ -1,22 +1,45 @@
 {
-  "id": "coder-reviewer",
-  "name": "Coder + Reviewer",
-  "description": "平台编排:coder 实现,reviewer 审查;reviewer 打回时 coder 修复一轮后复审。",
-  "maxRounds": 1,
+  "id": "test-generation",
+  "name": "测试用例生成流水线",
+  "type": "pipeline",
+  "description": "数据分析 → 测试用例表格生成 → 用例去重 → 测试代码生成；前一阶段产出作为后一阶段输入，产物统一写入 test-artifacts/。",
+  "maxRounds": 0,
   "agents": [
     {
-      "id": "coder",
-      "name": "Coder",
-      "emoji": "👨‍💻",
-      "role": "实现工程师,在工作区写代码与测试,完成后汇报改动文件与验证方式",
-      "writes": true
+      "id": "data-analysis",
+      "name": "数据分析",
+      "emoji": "📊",
+      "role": "分析需求、接口、数据样本与业务规则，输出测试范围、数据画像、风险与可测试点",
+      "writes": true,
+      "deliverable": "test-artifacts/01-analysis.md",
+      "brief": "你是测试流水线的「数据分析」阶段，只做分析，不写用例表，也不写测试代码。\n\n工作步骤：\n1. 读取用户任务中给出的需求、接口或数据文件；先浏览工作区，找到与测试目标相关的源码、配置、示例数据和已有测试。\n2. 分析以下内容：测试目标与范围；输入数据的来源、结构、字段类型、取值范围和约束；业务规则与状态流转；外部依赖；边界值、异常输入、组合场景、权限/安全/性能风险。\n3. 把结论写入 test-artifacts/01-analysis.md，至少包含：测试目标与范围、数据来源与字段画像（表格）、业务规则与约束、风险与重点场景、建议的测试策略与优先级、待确认问题（如有）。\n4. 不要虚构不存在的数据或规则；找不到时明确写「待用户补充」。\n5. 不要修改源码。最后用不超过 200 字总结关键结论和产物路径。"
     },
     {
-      "id": "reviewer",
-      "name": "Reviewer",
-      "emoji": "🔍",
-      "role": "代码审查员,只读审查并输出「结论:APPROVE」或「结论:NEEDS_CHANGES」",
-      "writes": false
+      "id": "testcase-table",
+      "name": "测试用例表格生成",
+      "emoji": "🧾",
+      "role": "基于分析产出结构化测试用例表格（CSV + Markdown），覆盖正常、边界、异常与组合场景",
+      "writes": true,
+      "deliverable": "test-artifacts/02-test-cases.csv",
+      "brief": "你是测试流水线的「测试用例表格生成」阶段。只生成用例表，不写自动化测试代码。\n\n输入：test-artifacts/01-analysis.md、相关源码和用户任务。\n\n要求：\n1. 表格列固定为：用例ID、模块、用例标题、前置条件、测试数据、操作步骤、预期结果、优先级、用例类型、关联需求、自动化建议。\n2. 覆盖正常流程、边界值、异常/非法输入、状态组合、权限与关键回归；每条用例只验证一个明确行为。\n3. 操作步骤用 1. 2. 3. 编号；预期结果必须可观察；测试数据要具体，不要写「合法数据」这类空话。\n4. 用例ID 使用 TC-<模块缩写>-001 形式，保持唯一。\n5. 写入 test-artifacts/02-test-cases.csv（UTF-8、带表头、逗号分隔；字段内逗号用引号包裹），同时写 test-artifacts/02-test-cases.md 方便预览。\n6. 不要遗漏分析阶段发现的风险点；确实无法覆盖的，在表后写明原因。\n7. 不要修改源码。最后用不超过 200 字总结用例数量、覆盖范围和产物路径。"
+    },
+    {
+      "id": "testcase-dedup",
+      "name": "用例去重",
+      "emoji": "🔁",
+      "role": "对用例表去重、合并、规范化并校验覆盖完整性，产出最终用例集",
+      "writes": true,
+      "deliverable": "test-artifacts/03-test-cases-final.csv",
+      "brief": "你是测试流水线的「用例去重」阶段。只处理用例表，不写自动化测试代码。\n\n输入：test-artifacts/02-test-cases.csv、test-artifacts/01-analysis.md。\n\n要求：\n1. 去重：完全相同，或「前置条件 + 操作步骤 + 预期结果」等价的用例只保留一条；语义重叠的用例合并步骤与测试数据，保留优先级更高、信息更完整的一条。\n2. 规范化：统一用例ID、优先级、用例类型的取值；补齐缺失列；修正步骤编号；确保预期结果可观察。\n3. 校验：ID 唯一、必填列非空、每条用例可执行；对照分析阶段的风险清单检查覆盖缺口，必要时补充用例。\n4. 产出：\n   - test-artifacts/03-test-cases-final.csv（最终用例表，列与输入一致）\n   - test-artifacts/03-dedup-report.md（去重前后数量、删除/合并清单、补充用例、覆盖说明）\n5. 不要修改源码。最后用不超过 200 字总结去重前后数量和最终产物路径。"
+    },
+    {
+      "id": "test-code",
+      "name": "测试代码生成",
+      "emoji": "🧪",
+      "role": "根据最终用例表生成可运行的自动化测试，执行并修复到通过",
+      "writes": true,
+      "deliverable": "tests/generated/",
+      "brief": "你是测试流水线的「测试代码生成」阶段。把最终用例表转换成可运行的自动化测试。\n\n输入：test-artifacts/03-test-cases-final.csv、test-artifacts/01-analysis.md 和工作区源码。\n\n要求：\n1. 先识别项目语言、测试框架和目录约定（Python 默认 pytest；JS/TS 用现有 Jest/Vitest；Java 用 JUnit）。优先复用已有测试结构和依赖，不引入新框架。\n2. 逐条映射 P0/P1 用例，P2 在环境允许时覆盖；测试函数名或 docstring 中保留用例ID，便于追溯。\n3. 测试放在现有测试目录或 tests/generated/，不要修改生产代码；外部服务、数据库和网络调用使用 mock，无法 mock 的标记跳过并说明原因。\n4. 不启动长驻服务；用一条命令运行测试，失败时先修复测试本身。如果确认是产品缺陷，保留失败用例并在报告中说明，不要修改产品行为来掩盖问题。\n5. 产出：\n   - 可运行的测试代码文件\n   - test-artifacts/04-test-code-report.md（用例ID → 测试函数映射、运行命令、通过/失败/跳过统计、未覆盖原因）\n6. 最后用不超过 250 字总结生成的文件、测试结果和产物路径。"
     }
   ]
 }

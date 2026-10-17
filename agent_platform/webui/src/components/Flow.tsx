@@ -1,17 +1,40 @@
 import { useEffect, useRef, type MouseEvent } from "react";
 import { renderMarkdown } from "../lib/markdown";
-import type { Block, ChildGroup, TranscriptEntry } from "../types";
+import type { AgentSpecInfo, Block, ChildGroup, TranscriptEntry } from "../types";
 
-const AGENT_ICON = { coder: "👨‍💻", reviewer: "🔍" } as const;
-const AGENT_NAME = { coder: "Coder", reviewer: "Reviewer" } as const;
-
-function phaseLabel(b: Extract<Block, { kind: "phase" }>): string {  const who = `${b.agent === "coder" ? "👨‍💻 Coder" : "🔍 Reviewer"}`;
-  const stage =
-    b.stage === "start" ? "开始编码" : b.stage === "fix" ? `第 ${b.round} 轮修复` : "审查中";
-  return `${who} · ${stage}`;
+function agentView(agents: AgentSpecInfo[], id?: string) {
+  const found = id ? agents.find((agent) => agent.id === id) : undefined;
+  return {
+    emoji: found?.emoji ?? "🤖",
+    name: found?.name ?? id ?? "Agent",
+  };
 }
 
-function ToolRow({ block }: { block: Extract<Block, { kind: "tool" }> }) {
+function phaseLabel(
+  b: Extract<Block, { kind: "phase" }>,
+  agents: AgentSpecInfo[],
+): string {
+  const view = agentView(agents, b.agent);
+  const stage =
+    b.stage === "start"
+      ? "开始"
+      : b.stage === "fix"
+        ? `第 ${b.round} 轮修复`
+        : b.stage === "review"
+          ? "审查中"
+          : b.stage === "done"
+            ? "已完成"
+            : "处理中";
+  return `${view.emoji} ${view.name} · ${stage}`;
+}
+
+function ToolRow({
+  block,
+  agents,
+}: {
+  block: Extract<Block, { kind: "tool" }>;
+  agents: AgentSpecInfo[];
+}) {
   const open = block.result?.isError ?? false;
   const running = block.result === undefined;
   return (
@@ -21,7 +44,7 @@ function ToolRow({ block }: { block: Extract<Block, { kind: "tool" }> }) {
         <span className="tool-name">{block.name}</span>
         <span className="tool-args">{block.detail || ""}</span>
         <span className={`tool-state${running ? " run" : ""}`}>
-          {block.agent && <span>{AGENT_ICON[block.agent]}</span>}
+          {block.agent && <span>{agentView(agents, block.agent).emoji}</span>}
           {running ? (
             <><span className="mini-spin" />运行中</>
           ) : block.result?.isError ? (
@@ -57,11 +80,12 @@ interface FlowProps {
   entries: TranscriptEntry[];
   blocks: Block[];
   childGroups: ChildGroup[];
+  agents: AgentSpecInfo[];
   running: boolean;
   emptyHint: string;
 }
 
-export function Flow({ entries, blocks, childGroups, running, emptyHint }: FlowProps) {
+export function Flow({ entries, blocks, childGroups, agents, running, emptyHint }: FlowProps) {
   const flowRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
 
@@ -107,11 +131,12 @@ export function Flow({ entries, blocks, childGroups, running, emptyHint }: FlowP
           }
           if (entry.role === "system") return <Md key={`e${i}`} className="note md" text={entry.text} />;
           if (entry.agent) {
+            const view = agentView(agents, entry.agent);
             return (
-              <div className={`agent-row ${entry.agent}`} key={`e${i}`}>
-                <div className="avatar">{AGENT_ICON[entry.agent]}</div>
+              <div className={`agent-row ${entry.agent}`} data-agent={entry.agent} key={`e${i}`}>
+                <div className="avatar">{view.emoji}</div>
                 <div className="agent-body">
-                  <div className="agent-tag">{AGENT_NAME[entry.agent]}</div>
+                  <div className="agent-tag">{view.name}</div>
                   <Md className="assistant-text md" text={entry.text} />
                 </div>
               </div>
@@ -124,35 +149,40 @@ export function Flow({ entries, blocks, childGroups, running, emptyHint }: FlowP
           switch (b.kind) {
             case "user":
               return <div className="bubble-user" key={`b${i}`}><div className="user-card">{b.text}</div></div>;
-            case "message":
-              return b.agent ? (
-                <div className={`agent-row ${b.agent}`} key={`b${i}`}>
-                  <div className="avatar">{AGENT_ICON[b.agent]}</div>
+            case "message": {
+              if (!b.agent) {
+                return (
+                  <div key={`b${i}`}>
+                    <Md className="assistant-text md" text={b.text || ""} />
+                    {i === blocks.length - 1 && running && <span className="caret" />}
+                  </div>
+                );
+              }
+              const view = agentView(agents, b.agent);
+              return (
+                <div className={`agent-row ${b.agent}`} data-agent={b.agent} key={`b${i}`}>
+                  <div className="avatar">{view.emoji}</div>
                   <div className="agent-body">
-                    <div className="agent-tag">{AGENT_NAME[b.agent]}</div>
+                    <div className="agent-tag">{view.name}</div>
                     <Md className="assistant-text md" text={b.text || ""} />
                     {i === blocks.length - 1 && running && <span className="caret" />}
                   </div>
                 </div>
-              ) : (
-                <div key={`b${i}`}>
-                  <Md className="assistant-text md" text={b.text || ""} />
-                  {i === blocks.length - 1 && running && <span className="caret" />}
-                </div>
               );
+            }
             case "reasoning":
               return (
                 <details className="reasoning" key={`b${i}`}>
-                  <summary>{b.scope === "child" && "🤖 "}{b.agent ? AGENT_NAME[b.agent] + " " : ""}💭 推理过程</summary>
+                  <summary>{b.scope === "child" && "🤖 "}{b.agent ? agentView(agents, b.agent).name + " " : ""}💭 推理过程</summary>
                   <div className="reasoning-body">{b.text}</div>
                 </details>
               );
             case "tool":
-              return <ToolRow key={`b${i}`} block={b} />;
+              return <ToolRow key={`b${i}`} block={b} agents={agents} />;
             case "phase":
               return (
                 <div className="phase" key={`b${i}`}>
-                  <span className="em">🧩</span>{phaseLabel(b)}
+                  <span className="em">🧩</span>{phaseLabel(b, agents)}
                   <span className="bar" />
                 </div>
               );

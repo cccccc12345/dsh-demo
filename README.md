@@ -13,7 +13,7 @@ agent_platform/
 │   ├── service.py     # Web 层唯一门面 AgentService
 │   ├── runtime.py     # 共享 dsh runtime 生命周期(启动/重启/停止)
 │   ├── turns.py       # 普通对话 turn + Mock 剧本
-│   ├── team.py        # lead 路由 + coder/reviewer 编排
+│   ├── team.py        # 工作流编排(pipeline 顺序执行 / review 路由)
 │   ├── events.py      # runtime 通知 → 前端事件
 │   ├── prompts.py     # prompt 拼接与标题兜底
 │   ├── models.py      # Chat 模型
@@ -22,7 +22,7 @@ agent_platform/
 │   ├── app.py         # FastAPI 路由 + lifespan
 │   ├── sse.py         # 事件队列 → SSE
 │   └── static.py      # 静态资源 / SPA 入口
-├── workflows.py       # 平台 agent 名册/团队 prompt 上下文
+├── workflows.py       # 工作流配置加载/角色名册/prompt 上下文
 ├── skills/            # 自定义 skill(SKILL.md,热更新)
 ├── dsh-patches/       # runtime patch(自定义 skill 根、MCP、subagent、tools 等)
 ├── dsh-plugins/       # runtime 插件(assistant-stream 转发、人工审批桥)
@@ -70,17 +70,16 @@ open http://127.0.0.1:8765
 - **Mock 模式**:启动时检测 `DEEPSEEK_API_KEY` 缺失或含非法字符(如中文引号占位符),则自动用本地剧本回放,不发模型请求,方便先看 UI。
 - **真实模式**:进程启动时拉起一个 harness runtime 子进程(dsh),所有会话共享;agent 的工作目录是 `.dsh-workspace/`(bash/read 等工具只能碰这里),运行时状态存 `.dsh-home/`。
 - 每个平台会话 = 一个 dsh session(`session-<uuid>`),右侧会话切换后历史从后端内存恢复。
-- **团队模式**(输入框下方勾选):平台先让内部 lead 判断请求类型,不再把所有输入都塞进编码流程 ——
-  - 普通问答、闲聊、能力询问 → lead 直接回答,不进入 coder/reviewer;
-  - 只读代码/文件调查 → investigator 只读回答,不触发 review;
-  - 需要改文件、实现功能、修 bug → 进入 coder + reviewer 流程:
-    1. 👨‍💻 **Coder**(独立 runtime 会话,角色指令内置):实现任务、自测、汇报改动文件
-    2. 🔍 **Reviewer**(独立 runtime 会话):独自读代码/跑测试,按规范输出 `结论:APPROVE / NEEDS_CHANGES`
-    3. reviewer 打回时,coder 会话继续(上下文连续)修复一轮,再交 reviewer 复审(默认最多 1 轮)
-  - 全程 SSE 流式:路由说明、阶段头、verdict、两个 agent 的工具调用/推理/结论气泡(左侧色条区分角色)
+- **工作流模式**(输入框下方勾选):由平台按 `workflows.json` 的 `type` 编排 ——
+  - `pipeline`(当前仓库默认):按 `agents` 顺序执行
+    **📊 数据分析 → 🧾 测试用例表格生成 → 🔁 用例去重 → 🧪 测试代码生成**。
+    每个阶段是独立 runtime 会话,上一阶段的结论和 `test-artifacts/` 产物会传给下一阶段;
+    全程 SSE 流式展示每个角色的工具调用、推理和输出。
+  - `review`(兼容旧配置):先由内部 lead 路由,普通问答直接回答、只读调查走 investigator、
+    需要改文件时进入 coder → reviewer →(可选)coder 修复 → reviewer 复审。
 - **Agent 名册**:`list_agents` 是 dsh runtime 的"当前 agent 已派生的 continuable 子代理"列表,
-  **不是**平台角色清单。团队模式的 coder/reviewer 是并行的独立 session,不互为父子,
-  所以 coder 查 `list_agents` 为空是正常的。平台会把 `workflows.json` 里的名册注入每个角色的 prompt,
+  **不是**平台角色清单。工作流里的各角色是并行的独立 session,不互为父子,
+  所以任一角色查 `list_agents` 为空是正常的。平台会把 `workflows.json` 里的名册注入每个角色的 prompt,
   让模型能正确回答"有哪些 agent";同时通过 `GET /api/agents` 暴露名册和数量。
 - 事件流(SSE)由 runtime 通知翻译而来:
   - `tool/call` / `tool/result` → 工具芯片 + 可折叠的输出
@@ -90,33 +89,56 @@ open http://127.0.0.1:8765
   - `approval_request` / `approval_resolved` → 人工审批条 + 轨迹;决定通过 `POST /api/approvals/{id}` 提交
 - 同一会话正在跑 turn 时,再次发送返回 409;会话运行中禁止删除/切换。
 
-## 自定义团队名册
+## 自定义 Agent 工作流
 
-编辑仓库根目录的 `workflows.json`,可覆盖团队角色的展示名称、emoji、职责描述和最大修复轮数。
-后端会把它注入每个角色的 prompt,并可通过 `GET /api/agents` 读取当前名册与数量:
+编辑仓库根目录的 `workflows.json` 即可定义角色和流程。`type` 决定编排方式:
+
+- `pipeline`:按 `agents` 数组顺序逐阶段执行,前一阶段的最终输出和产物路径作为后一阶段的输入;
+- `review`:旧的 coder/reviewer 质量门禁(lead 路由 + 打回重修),角色仍只支持 `coder` / `reviewer`。
+
+当前仓库默认是四阶段测试生成流水线:
 
 ```json
 {
-  "id": "coder-reviewer",
-  "name": "Coder + Reviewer",
-  "description": "平台编排:coder 实现,reviewer 审查。",
-  "maxRounds": 1,
+  "id": "test-generation",
+  "name": "测试用例生成流水线",
+  "type": "pipeline",
+  "description": "数据分析 → 测试用例表格生成 → 用例去重 → 测试代码生成。",
   "agents": [
-    { "id": "coder", "name": "Coder", "emoji": "👨‍💻",
-      "role": "实现工程师", "writes": true },
-    { "id": "reviewer", "name": "Reviewer", "emoji": "🔍",
-      "role": "代码审查员", "writes": false }
+    { "id": "data-analysis", "name": "数据分析", "emoji": "📊",
+      "role": "分析需求、数据与业务规则,输出测试范围、风险与可测试点",
+      "brief": "你是测试流水线的「数据分析」阶段……",
+      "deliverable": "test-artifacts/01-analysis.md" },
+    { "id": "testcase-table", "name": "测试用例表格生成", "emoji": "🧾",
+      "role": "产出结构化测试用例表格",
+      "brief": "……", "deliverable": "test-artifacts/02-test-cases.csv" },
+    { "id": "testcase-dedup", "name": "用例去重", "emoji": "🔁",
+      "role": "去重、合并、规范化并校验覆盖",
+      "brief": "……", "deliverable": "test-artifacts/03-test-cases-final.csv" },
+    { "id": "test-code", "name": "测试代码生成", "emoji": "🧪",
+      "role": "根据最终用例表生成可运行测试",
+      "brief": "……", "deliverable": "tests/generated/" }
   ]
 }
 ```
 
-- `maxRounds` 控制 reviewer 打回后 coder 最多修复几轮(0–10)。
-- 当前平台编排器在 coding 路由下固定执行「coder 实现 → reviewer 审查 →(可选)coder 修复 → reviewer 复审」,
-  所以角色只支持 `coder` / `reviewer`;要支持任意角色图,需要扩展 `agent/team.py` 的 `run_team_turn`,
-  或改用 dsh 原生的 `subagent` / `workflow` 工具。
-- 自定义 `name` / `emoji` 会进入 prompt 和 `GET /api/agents`,但前端团队面板暂时仍使用固定的
-  Coder / Reviewer 标签;角色 `id` 始终是 `coder` / `reviewer`。
-- 配置缺失或非法时自动回退到默认名册,并在启动日志里打印警告。
+每个角色支持的字段:
+
+| 字段 | 说明 |
+|---|---|
+| `id` | 必填,kebab-case 且全局唯一;不能使用 `assistant` / `lead` / `platform` |
+| `name` / `emoji` | 前端和 prompt 里展示的角色名与图标 |
+| `role` | 必填,一句话职责说明(进入名册和 prompt) |
+| `writes` | 是否允许写工作区,仅作名册说明 |
+| `brief` | 该阶段的完整工作指令;缺省时回退到 `role` |
+| `deliverable` | 该阶段约定产物(相对工作区的路径),会交给下游并出现在最终汇总里 |
+
+流水线约束:
+
+- 阶段数 1–12,按数组顺序执行,不支持分支/并行;
+- 每阶段使用独立 runtime 会话(`chat.agent_sids`),同一 chat 内可跨轮复用上下文;
+- 上游结论超过 8000 字符会截断,完整内容由下游读取 `deliverable` 文件;
+- 配置缺失或非法时自动回退到内置 coder/reviewer 名册,并在启动日志里打印警告;
 - 修改 `workflows.json` 后需重启服务生效。
 
 ## 配置 Skill
@@ -249,7 +271,7 @@ assistant_stream_end
 - `USER` / `Turn` / `Step`
 - 工具调用与结果,含调用耗时
 - Assistant 消息与 reasoning 摘要
-- 团队模式的 phase / verdict / 子代理启动结束
+- 工作流的 phase / verdict / 子代理启动结束
 - token usage(`input / output / cached`)
 - 结束原因(completed / stopped / error)
 
@@ -293,7 +315,7 @@ POST /api/stop
 - 会话历史在内存里,重启即清(可加 SQLite / 文件持久化)。
 - **runtime 会话生命周期**:每个 chat 首次发消息时新建随机 runtime session(`chat.runtime_sid`),同进程内多轮续聊共享它;server 重启后该 chat 的 runtime 会话失效,再发消息会**自动新建 runtime 会话并把最近对话注入为上下文**(transcript 里可见一条 system 备注)。runtime 不支持从 `.dsh-home` 持久化会话续聊(实测 `already exists`),故刻意不把 chat id 当作 runtime session id,彻底规避。
 - 错误与"空回复"都会写进 transcript(role=system),UI 刷新后仍可见,不会出现"发了消息没有任何反馈"的静默失败。
-- 团队模式先做一次 lead 路由模型调用:普通问题更快且不会走 review;路由失败会回退旧的 coder/reviewer 流程。
+- `review` 工作流会先做一次 lead 路由模型调用:普通问题更快且不会走 review;路由失败会回退旧的 coder/reviewer 流程。`pipeline` 工作流不做路由,按配置顺序执行。
 - runtime 意外退出后,下一次请求会自动重启 runtime;重启失败返回 503,不会继续往已关闭的管道写请求。
 - 不建议用 `uvicorn --reload` 跑这个后端:reload 会关闭 runtime,正在进行的 SSE 会收到 `TransportClosedError`;前端调试请单独用 Vite,后端改代码后手动重启。
 - 无鉴权,不要暴露到公网;agent 有 bash 权限,工作目录即沙箱边界。

@@ -48,7 +48,7 @@ dsh runtime (Node, --profile sdk)
 | 配置 | 位置 | 作用 |
 |---|---|---|
 | 模型 / API key | `.env` | provider、model、DeepSeek key/base URL |
-| 团队工作流 | `workflows.json` | coder/reviewer 的名称、描述、最大修复轮数 |
+| 工作流 | `workflows.json` | `pipeline` 的阶段顺序/角色指令/产物，或 `review` 的 coder/reviewer 配置 |
 | Skill | `agent_platform/skills/` | 自定义 `SKILL.md` |
 | Skill 根目录 patch | `agent_platform/dsh-patches/skills.yml` | 把 `customSkillDirs` 指向仓库内 skills |
 | MCP | `agent_platform/dsh-patches/mcp.yml` | 每个 MCP server 一条配置 |
@@ -200,7 +200,7 @@ skill(name="code-review")
 注意：
 
 - 只有 frontmatter 变化才会改变 catalog digest；只改正文不会重新发布 catalog，但下一次 `skill` 调用会读到新正文。
-- 当前平台所有 agent 共享同一个 skill 根，所以 coder/reviewer/lead 都能看到所有 skill。没有 per-agent 硬隔离。
+- 当前平台所有 agent 共享同一个 skill 根，所以工作流各角色和 lead 都能看到所有 skill。没有 per-agent 硬隔离。
 
 ### 3.6 加一个 skill 的最短路径
 
@@ -476,19 +476,31 @@ $DSH_HOME/patches/streaming.yml
 
 这里有三个不同层次，容易混：
 
-### 6.1 平台团队工作流（当前默认）
+### 6.1 平台团队工作流（当前默认：pipeline）
 
-`workflows.json` 定义的是 **平台侧角色名册**，不是 dsh 的 workflow 引擎。
+`workflows.json` 定义的是 **平台侧角色与顺序**，不是 dsh 的 workflow 引擎。
+`type` 支持两种编排：
+
+- `pipeline`（当前仓库默认）：按 `agents` 数组顺序逐阶段执行；
+- `review`：旧的 coder → reviewer 质量门禁。
+
+当前四阶段测试生成流水线：
 
 ```json
 {
-  "id": "coder-reviewer",
-  "name": "Coder + Reviewer",
-  "description": "平台编排:coder 实现,reviewer 审查。",
-  "maxRounds": 1,
+  "id": "test-generation",
+  "name": "测试用例生成流水线",
+  "type": "pipeline",
+  "description": "数据分析 → 测试用例表格 → 用例去重 → 测试代码生成。",
   "agents": [
-    { "id": "coder", "name": "Coder", "emoji": "👨‍💻", "role": "...", "writes": true },
-    { "id": "reviewer", "name": "Reviewer", "emoji": "🔍", "role": "...", "writes": false }
+    { "id": "data-analysis", "name": "数据分析", "emoji": "📊", "role": "...",
+      "brief": "...", "deliverable": "test-artifacts/01-analysis.md" },
+    { "id": "testcase-table", "name": "测试用例表格生成", "emoji": "🧾", "role": "...",
+      "brief": "...", "deliverable": "test-artifacts/02-test-cases.csv" },
+    { "id": "testcase-dedup", "name": "用例去重", "emoji": "🔁", "role": "...",
+      "brief": "...", "deliverable": "test-artifacts/03-test-cases-final.csv" },
+    { "id": "test-code", "name": "测试代码生成", "emoji": "🧪", "role": "...",
+      "brief": "...", "deliverable": "tests/generated/" }
   ]
 }
 ```
@@ -497,15 +509,26 @@ $DSH_HOME/patches/streaming.yml
 
 ```text
 [平台团队上下文]
-当前工作流: coder-reviewer
-团队名册: 2 个模型 agent + 1 个平台编排器
+当前工作流: test-generation（测试用例生成流水线）
+这是一个 4 阶段的顺序流水线: `data-analysis` → `testcase-table` → ...
+团队名册: 4 个模型 agent + 1 个平台编排器
 ...
 list_agents 只列你派生的 continuable 子代理,不列平台角色。
 ```
 
-### 6.2 Lead 路由
+`agent_platform/agent/team.py` 的 `run_pipeline_turn` 负责执行：
 
-团队模式不是“所有输入都写代码”。`agent_platform/agent/team.py` 的 `run_team_turn` 先跑一个内部 lead：
+1. 按顺序取 `workflow.agents`；
+2. 给每个阶段发送 `phase(start)` 事件；
+3. 用该角色独立会话执行 turn，prompt 里带上用户任务、上游结论、上游产物路径和该角色的 `brief`；
+4. 把最终输出写入 transcript（`agent=<id>`），并发送 `phase(done)`；
+5. 全部结束后输出阶段/产物汇总，`finish_reason=workflow:completed`。
+
+上游结论超过 8000 字符会截断，完整内容由下游读取 `deliverable` 文件。
+
+### 6.2 Lead 路由（仅 review 工作流）
+
+`review` 工作流不是“所有输入都写代码”。`run_team_turn` 先跑一个内部 lead：
 
 ```text
 用户请求
@@ -520,7 +543,7 @@ lead 输出严格 JSON：
 {"route":"answer|inspect|coding","plan":"...","answer":"..."}
 ```
 
-路由失败会回退旧的 coder/reviewer 流程。
+路由失败会回退旧的 coder/reviewer 流程。`pipeline` 工作流会跳过 lead，直接按配置顺序执行。
 
 ### 6.3 原生 dsh workflow 工具
 
@@ -575,7 +598,7 @@ return { reviewed: reviews.length }
 
 | 方式 | 谁决定流程 | 适合 |
 |---|---|---|
-| 平台团队工作流 | 平台代码 + lead 路由 | 稳定的 coder/reviewer 质量门禁 |
+| 平台工作流 | 平台代码（`pipeline` 固定顺序；`review` 加 lead 路由） | 可复用的多阶段流水线、稳定的 coder/reviewer 质量门禁 |
 | 原生 `subagent` | 模型 | 一两个独立委派 |
 | 原生 `workflow` | 模型写 JS | 大量并行子任务、审计、迁移、多角度调研 |
 
@@ -688,16 +711,17 @@ return { research, code, review }
 仅挂工具还不够。工具有名字,但模型不一定知道何时用。建议二选一:
 
 1. 在 `agent_platform/skills/` 加一个 `subagents/SKILL.md`,写清每个工具的职责和使用时机;
-2. 或在 `workflows.json`/平台 prompt 里加一段名册(当前平台只内置 coder/reviewer,自定义工具需要自己补 prompt)。
+2. 或在 `workflows.json`/平台 prompt 里加一段名册(角色清单由 `workflows.json` 决定,自定义工具需要自己补 prompt)。
 
 推荐用 skill,因为 skill 是模型可发现的,且与工具配置解耦。
 
-#### 和当前团队模式的关系
+#### 和平台工作流的关系
 
-当前团队模式是**平台侧 root session 编排**:
+平台工作流是**平台侧 root session 编排**:
 
 ```text
-lead(root) → coder(root) → reviewer(root)
+pipeline: data-analysis(root) → testcase-table(root) → testcase-dedup(root) → test-code(root)
+review:   lead(root) → coder(root) → reviewer(root)
 ```
 
 命名 subagent 是**父 agent 内的子会话树**:
@@ -708,7 +732,7 @@ main(root) → coder(child) / reviewer(child)
 
 两者不要混用同一套角色名,否则模型会混淆“平台角色”和“子代理工具”。如果要迁移,建议:
 
-- 保留平台团队模式作为稳定的质量门禁;
+- 保留平台工作流作为稳定、可复用的流程编排;
 - 另建一个“自由编排”模式,启用 `agents.yml`,主 agent 自己调用子 agent。
 
 ---

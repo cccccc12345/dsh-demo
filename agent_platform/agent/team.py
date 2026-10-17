@@ -15,12 +15,18 @@ from typing import Any
 from deepseek_harness import DeepSeekHarness
 from deepseek_harness.errors import JsonRpcError, TransportClosedError
 
-from agent_platform.workflows import WorkflowSpec
+from agent_platform.workflows import AgentSpec, WorkflowSpec
 
 from .events import make_notification_handler
 from .models import Chat
 from .prompts import team_prompt
 from .turns import finish_stopped
+
+_PIPELINE_OUTPUT_PREVIEW = 8000
+_PIPELINE_STAGE_RULES = (
+    "只完成当前阶段,不要提前执行后续阶段,也不要重复上游已完成的工作。"
+    "需要上游产物时优先读取工作区里的文件;所有产物写入工作区并使用相对路径。"
+)
 
 _CODER_BRIEF = (
     "你是团队中的 coder(实现工程师)。只在给定的工作目录里写代码与测试,"
@@ -179,6 +185,174 @@ def review_verdict(review_text: str) -> str:
     return "APPROVE"  # 未明确表态时宽松处理
 
 
+def _clip(text: str, limit: int = _PIPELINE_OUTPUT_PREVIEW) -> str:
+    """截断上游结论,避免单个阶段把上下文撑爆;完整产物以文件为准。"""
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n…(已截断,完整内容请读取产物文件;共 {len(text)} 字符)"
+
+
+def pipeline_stage_prompt(
+    workflow: WorkflowSpec,
+    agent: AgentSpec,
+    index: int,
+    total: int,
+    text: str,
+    previous: tuple[AgentSpec, str] | None,
+) -> str:
+    """构造流水线某一阶段的 prompt:任务 + 上游结论 + 产物索引 + 角色指令。"""
+    parts = [
+        f"[用户任务]\n{text}",
+        (
+            f"[当前阶段]\n第 {index}/{total} 阶段:{agent.emoji} {agent.name} "
+            f"`{agent.id}`\n职责:{agent.role}"
+        ),
+    ]
+    if agent.deliverable:
+        parts.append(f"约定产物:`{agent.deliverable}`")
+    if previous is None:
+        parts.append("[上游产出]\n(无,本阶段是流水线起点)")
+    else:
+        previous_agent, previous_output = previous
+        parts.append(
+            f"[上游产出]\n{previous_agent.emoji} {previous_agent.name} "
+            f"`{previous_agent.id}` 的阶段结论:\n{_clip(previous_output)}"
+        )
+        upstream_files = [
+            item.deliverable
+            for item in workflow.agents[: index - 1]
+            if item.deliverable
+        ]
+        if upstream_files:
+            parts.append(
+                "[上游产物文件]\n"
+                + "\n".join(f"- `{path}`" for path in upstream_files)
+                + "\n请先读取与当前阶段相关的文件,再开始工作。"
+            )
+    parts.append(f"[阶段规则]\n{_PIPELINE_STAGE_RULES}")
+    body = "\n\n".join(parts)
+    return team_prompt(agent.id, agent.brief or agent.role, body, workflow)
+
+
+def pipeline_summary(
+    workflow: WorkflowSpec, outputs: list[tuple[AgentSpec, str]]
+) -> str:
+    """流水线结束后的汇总:每阶段产物 + 最终阶段结论。"""
+    rows = [
+        f"## {workflow.name} 已完成",
+        "",
+        "| 阶段 | Agent | 约定产物 |",
+        "|---|---|---|",
+    ]
+    for index, (agent, _output) in enumerate(outputs, start=1):
+        deliverable = f"`{agent.deliverable}`" if agent.deliverable else "—"
+        rows.append(f"| {index} | {agent.emoji} {agent.name} | {deliverable} |")
+    if outputs:
+        last_agent, last_output = outputs[-1]
+        rows.extend(
+            [
+                "",
+                f"**最终阶段({last_agent.emoji} {last_agent.name})结论:**",
+                _clip(last_output, 1500),
+            ]
+        )
+    rows.append("")
+    rows.append("完整产物见工作区;如需调整某个阶段,可以直接在对话里补充要求后重跑。")
+    return "\n".join(rows)
+
+
+def run_pipeline_turn(
+    text: str,
+    chat: Chat,
+    q: "queue.Queue[Any]",
+    *,
+    harness: DeepSeekHarness,
+    workflow: WorkflowSpec,
+) -> None:
+    """按 ``workflow.agents`` 顺序执行流水线,每个角色使用独立且可复用的会话。"""
+    chat.add_user(text)
+    q.put({"type": "user_echo", "text": text})
+    if chat.stop_requested:
+        finish_stopped(chat, q)
+        return
+    total = len(workflow.agents)
+    outputs: list[tuple[AgentSpec, str]] = []
+    try:
+        for index, agent in enumerate(workflow.agents, start=1):
+            if chat.stop_requested:
+                finish_stopped(chat, q)
+                return
+            q.put(
+                {
+                    "type": "phase",
+                    "agent": agent.id,
+                    "stage": "start",
+                    "round": 0,
+                    "index": index,
+                    "total": total,
+                }
+            )
+            prompt = pipeline_stage_prompt(
+                workflow,
+                agent,
+                index,
+                total,
+                text,
+                outputs[-1] if outputs else None,
+            )
+            sid, result = run_phase(
+                harness,
+                chat,
+                q,
+                agent.id,
+                chat.agent_sids.get(agent.id),
+                prompt,
+                text,
+            )
+            chat.agent_sids[agent.id] = sid
+            if chat.stop_requested:
+                finish_stopped(chat, q)
+                return
+            output = result.final_response or f"({agent.name} 未产出文本)"
+            outputs.append((agent, output))
+            chat.add_assistant(output, agent=agent.id)
+            q.put(
+                {
+                    "type": "phase",
+                    "agent": agent.id,
+                    "stage": "done",
+                    "round": 0,
+                    "index": index,
+                    "total": total,
+                }
+            )
+
+        if not chat.title:
+            chat.title = " ".join(text.split())[:18]
+            q.put({"type": "chat_title", "title": chat.title})
+        summary = pipeline_summary(workflow, outputs)
+        chat.add_assistant(summary)
+        q.put(
+            {
+                "type": "end",
+                "response": summary,
+                "finish_reason": "workflow:completed",
+            }
+        )
+    except TransportClosedError:
+        if chat.stop_requested:
+            finish_stopped(chat, q)
+        else:
+            message = "DeepSeek Harness runtime 已退出,请重试"
+            chat.add_system(f"⚠️ {message}")
+            q.put({"type": "error", "message": message})
+    except Exception as exc:  # noqa: BLE001
+        message = f"{type(exc).__name__}: {exc}"
+        chat.add_system(f"⚠️ {message}")
+        q.put({"type": "error", "message": message})
+
+
 def run_team_turn(
     text: str,
     chat: Chat,
@@ -187,6 +361,9 @@ def run_team_turn(
     harness: DeepSeekHarness,
     workflow: WorkflowSpec,
 ) -> None:
+    if workflow.is_pipeline:
+        run_pipeline_turn(text, chat, q, harness=harness, workflow=workflow)
+        return
     chat.add_user(text)
     q.put({"type": "user_echo", "text": text})
     if chat.stop_requested:
@@ -367,7 +544,66 @@ def run_team_turn(
         q.put({"type": "error", "message": message})
 
 
-def run_mock_team_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
+def run_mock_pipeline_turn(
+    text: str, chat: Chat, q: "queue.Queue[Any]", workflow: WorkflowSpec
+) -> None:
+    """Mock 模式的流水线剧本:快速回放每个阶段的 phase / message / end。"""
+    chat.add_user(text)
+    q.put({"type": "user_echo", "text": text})
+    outputs: list[tuple[AgentSpec, str]] = []
+    total = len(workflow.agents)
+    for index, agent in enumerate(workflow.agents, start=1):
+        time.sleep(0.15)
+        q.put(
+            {
+                "type": "phase",
+                "agent": agent.id,
+                "stage": "start",
+                "round": 0,
+                "index": index,
+                "total": total,
+            }
+        )
+        time.sleep(0.2)
+        output = f"[mock] {agent.emoji} {agent.name} 已完成第 {index}/{total} 阶段。"
+        if agent.deliverable:
+            output += f" 产物:{agent.deliverable}"
+        q.put({"type": "message", "text": output, "reasoning": "", "agent": agent.id})
+        chat.add_assistant(output, agent=agent.id)
+        outputs.append((agent, output))
+        q.put(
+            {
+                "type": "phase",
+                "agent": agent.id,
+                "stage": "done",
+                "round": 0,
+                "index": index,
+                "total": total,
+            }
+        )
+    if not chat.title:
+        chat.title = " ".join(text.split())[:18]
+        q.put({"type": "chat_title", "title": chat.title})
+    summary = pipeline_summary(workflow, outputs)
+    chat.add_assistant(summary)
+    q.put(
+        {
+            "type": "end",
+            "response": summary,
+            "finish_reason": "workflow:completed",
+        }
+    )
+
+
+def run_mock_team_turn(
+    text: str,
+    chat: Chat,
+    q: "queue.Queue[Any]",
+    workflow: WorkflowSpec | None = None,
+) -> None:
+    if workflow is not None and workflow.is_pipeline:
+        run_mock_pipeline_turn(text, chat, q, workflow)
+        return
     chat.add_user(text)
     q.put({"type": "user_echo", "text": text})
     time.sleep(0.2)
