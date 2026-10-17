@@ -1,0 +1,27 @@
+# Secrets / local state
+.env
+.env.*
+!.env.example
+.dsh-home/
+.dsh-workspace/
+.credentials.yaml
+*.pem
+*.key
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.pnpm-store/
+
+# Logs / OS / editor
+*.log
+.DS_Store
+.idea/
+.vscode/

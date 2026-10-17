@@ -1,0 +1,22 @@
+{
+  "id": "coder-reviewer",
+  "name": "Coder + Reviewer",
+  "description": "平台编排:coder 实现,reviewer 审查;reviewer 打回时 coder 修复一轮后复审。",
+  "maxRounds": 1,
+  "agents": [
+    {
+      "id": "coder",
+      "name": "Coder",
+      "emoji": "👨‍💻",
+      "role": "实现工程师,在工作区写代码与测试,完成后汇报改动文件与验证方式",
+      "writes": true
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "emoji": "🔍",
+      "role": "代码审查员,只读审查并输出「结论:APPROVE」或「结论:NEEDS_CHANGES」",
+      "writes": false
+    }
+  ]
+}

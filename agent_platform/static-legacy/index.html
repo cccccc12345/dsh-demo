@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepSeek Harness · Agent 平台</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="logo">⚡</div>
+        <div>
+          <div class="brand-name">Agent 平台</div>
+          <div class="brand-sub">deepseek-harness SDK</div>
+        </div>
+      </div>
+      <button id="new-chat" class="btn-primary">＋ 新会话</button>
+      <nav id="chat-list" aria-label="会话列表"></nav>
+      <div class="sidebar-foot">
+        <div id="banner" class="hidden"></div>
+        <div class="meta" id="config-meta"></div>
+      </div>
+    </aside>
+    <main id="main">
+      <header id="topbar">
+        <div class="topbar-title" id="chat-title">选择或创建一个会话</div>
+        <div class="topbar-chips" id="config-chips"></div>
+      </header>
+      <div id="messages" aria-live="polite"></div>
+      <footer id="composer">
+        <div id="composer-row">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="给 agent 一个任务…(Enter 发送,Shift+Enter 换行)"
+            disabled
+          ></textarea>
+          <button id="send" class="btn-primary" disabled>发送</button>
+        </div>
+        <label class="team-toggle" title="由平台编排 coder + reviewer 两个角色 agent,reviewer 不通过会打回重写">
+          <input type="checkbox" id="team-mode" disabled />
+          <span>👥 团队模式(coder + reviewer)</span>
+        </label>
+      </footer>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

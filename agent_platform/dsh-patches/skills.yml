@@ -1,0 +1,7 @@
+# 平台自定义 skill 根目录。DSH_SKILLS_DIR 由 agent_platform/main.py 注入。
+# 该 patch 覆盖 @deepseek-ai/dsh-skill-filesystem 的 customSkillDirs,
+# 默认的项目/用户 skill 根仍然保留。
+- id: skill-filesystem
+  config:
+    customSkillDirs:
+      - !!js process.env.DSH_SKILLS_DIR

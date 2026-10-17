@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn>=0.29
+
+# dsh Python SDK + bundled runtime (installed versions in this demo)
+deepseek-harness-sdk==0.1.5rc1
+deepseek-harness-runtime-bin==0.1.5rc1
