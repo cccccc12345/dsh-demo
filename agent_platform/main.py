@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import re
+import subprocess
 import threading
 import time
 import uuid
@@ -26,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig, Notification
-from deepseek_harness.errors import JsonRpcError
+from deepseek_harness.errors import JsonRpcError, TransportClosedError
 
 from agent_platform.workflows import WorkflowSpec, load_workflow
 
@@ -92,6 +93,8 @@ class Chat:
     reviewer_sid: str | None = None
     # 团队 lead(路由/直答)会话;和 coder/reviewer 分开,避免内部 JSON 污染角色上下文
     lead_sid: str | None = None
+    # 全局"停止全部"会置位;worker 看到后输出干净的 stopped 结束事件
+    stop_requested: bool = False
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -151,6 +154,39 @@ def _harness_alive(harness: DeepSeekHarness | None) -> bool:
         return False
     proc = getattr(getattr(harness, "client", None), "_proc", None)
     return proc is not None and proc.poll() is None
+
+
+def _stop_all_runtime() -> bool:
+    """停止全部:终止共享 runtime,下一次请求由 _ensure_harness 自动重启。
+
+    SDK wire 没有 prompt-cancel 方法,所以"全部停止"用硬中断实现;
+    所有 chat 会被标记 stop_requested,worker 收到 TransportClosedError
+    后输出干净的 stopped 结束事件而不是错误框。
+    """
+    with state.chats_lock:
+        chats = list(state.chats.values())
+    for chat in chats:
+        chat.stop_requested = True
+
+    with state.harness_lock:
+        harness = state.harness
+        state.harness = None
+        if harness is None:
+            return False
+        proc = getattr(getattr(harness, "client", None), "_proc", None)
+        if proc is None or proc.poll() is not None:
+            return False
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agent-platform] 停止 runtime 失败:{exc}")
+            return False
 
 
 def _ensure_harness() -> DeepSeekHarness | None:
@@ -301,6 +337,10 @@ def _translate_one(n: Notification) -> dict[str, Any] | None:
                         "streamId": stream_id,
                         "text": text,
                     }
+            if chunk.get("type") == "usage":
+                usage = chunk.get("usage")
+                if isinstance(usage, dict):
+                    return {"type": "usage", "streamId": stream_id, "usage": usage}
             return None
         if frame_type == "end":
             return {"type": "assistant_stream_end", "streamId": stream_id}
@@ -433,6 +473,11 @@ def _append_system(chat: Chat, text: str) -> None:
     chat.transcript.append({"role": "system", "text": text, "ts": time.time()})
 
 
+def _finish_stopped(chat: Chat, q: "queue.Queue[Any]") -> None:
+    _append_system(chat, "⏹️ 已停止全部任务")
+    q.put({"type": "end", "response": "", "finish_reason": "stopped"})
+
+
 _TITLE_NOISE = (
     "[平台上下文]",
     "[平台团队上下文]",
@@ -508,6 +553,9 @@ def _run_real_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
     assert harness is not None
     chat.transcript.append({"role": "user", "text": text, "ts": time.time()})
     q.put({"type": "user_echo", "text": text})
+    if chat.stop_requested:
+        _finish_stopped(chat, q)
+        return
     try:
         if chat.runtime_sid is None:
             # 全新随机 runtime session id,绝不与磁盘持久化的旧会话撞车
@@ -554,6 +602,13 @@ def _run_real_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
                 "finish_reason": result.finish_reason,
             }
         )
+    except TransportClosedError:
+        if chat.stop_requested:
+            _finish_stopped(chat, q)
+        else:
+            message = "DeepSeek Harness runtime 已退出,请重试"
+            _append_system(chat, f"⚠️ {message}")
+            q.put({"type": "error", "message": message})
     except Exception as exc:  # noqa: BLE001 - 一切异常都要送到浏览器并留痕
         message = f"{type(exc).__name__}: {exc}"
         _append_system(chat, f"⚠️ {message}")
@@ -738,6 +793,9 @@ def _run_team_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
     assert harness is not None
     chat.transcript.append({"role": "user", "text": text, "ts": time.time()})
     q.put({"type": "user_echo", "text": text})
+    if chat.stop_requested:
+        _finish_stopped(chat, q)
+        return
     try:
         # 先让 lead 判断:普通问题直接回答,只有编码任务才进入 coder/reviewer 流程。
         decision: LeadDecision | None = None
@@ -749,6 +807,10 @@ def _run_team_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
                 f"⚠️ 团队路由失败,已回退 coder/reviewer:{type(exc).__name__}: {exc}",
             )
             q.put({"type": "reasoning", "text": "团队路由失败,回退 coder/reviewer 流程。"})
+
+        if chat.stop_requested:
+            _finish_stopped(chat, q)
+            return
 
         if decision is not None and decision.route == "answer":
             q.put({"type": "reasoning", "text": "团队路由:直接回答(无需写代码/审查)"})
@@ -762,6 +824,9 @@ def _run_team_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
                 harness, chat, q, None, chat.lead_sid, answer_prompt, text
             )
             chat.lead_sid = sid
+            if chat.stop_requested:
+                _finish_stopped(chat, q)
+                return
             answer = answer_result.final_response or decision.answer
             if not chat.title:
                 chat.title = " ".join(text.split())[:18]
@@ -804,6 +869,9 @@ def _run_team_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
                 harness, chat, q, None, chat.coder_sid, prompt, text
             )
             chat.coder_sid = sid
+            if chat.stop_requested:
+                _finish_stopped(chat, q)
+                return
             answer = inspect_result.final_response or "(investigator 未产出文本)"
             if not chat.title:
                 chat.title = " ".join(text.split())[:18]
@@ -857,6 +925,9 @@ def _run_team_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
                     harness, chat, q, "coder", chat.coder_sid, prompt, text
                 )
             chat.coder_sid = sid
+            if chat.stop_requested:
+                _finish_stopped(chat, q)
+                return
             coder_report = coder_result.final_response or "(coder 未产出文本)"
             _append_agent(chat, "coder", coder_result.final_response or "")
 
@@ -871,6 +942,9 @@ def _run_team_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
                 harness, chat, q, "reviewer", chat.reviewer_sid, review_prompt, text
             )
             chat.reviewer_sid = sid
+            if chat.stop_requested:
+                _finish_stopped(chat, q)
+                return
             review_out = reviewer_result.final_response or "(reviewer 未产出文本)"
             verdict = _review_verdict(review_out)
             _append_agent(chat, "reviewer", review_out)
@@ -888,6 +962,13 @@ def _run_team_turn(text: str, chat: Chat, q: "queue.Queue[Any]") -> None:
         )
         chat.transcript.append({"role": "assistant", "text": summary, "ts": time.time()})
         q.put({"type": "end", "response": summary, "finish_reason": f"team:{verdict}"})
+    except TransportClosedError:
+        if chat.stop_requested:
+            _finish_stopped(chat, q)
+        else:
+            message = "DeepSeek Harness runtime 已退出,请重试"
+            _append_system(chat, f"⚠️ {message}")
+            q.put({"type": "error", "message": message})
     except Exception as exc:  # noqa: BLE001
         message = f"{type(exc).__name__}: {exc}"
         _append_system(chat, f"⚠️ {message}")
@@ -1055,6 +1136,17 @@ def api_list_agents() -> dict[str, Any]:
     }
 
 
+@app.post("/api/stop")
+def api_stop_all() -> dict[str, Any]:
+    """停止全部:硬中断共享 runtime;下一条消息会自动重启。"""
+    stopped = _stop_all_runtime()
+    return {
+        "ok": True,
+        "stopped": stopped,
+        "message": "全部任务已停止;下一条消息会自动重启 runtime",
+    }
+
+
 @app.get("/api/chats")
 def api_list_chats() -> list[dict[str, Any]]:
     with state.chats_lock:
@@ -1117,6 +1209,7 @@ def _stream_turn(
     chat = _get_or_create_chat(chat_id)
     if not chat.lock.acquire(blocking=False):
         raise HTTPException(409, "上一条消息还在处理中")
+    chat.stop_requested = False
 
     if not state.mock_mode and _ensure_harness() is None:
         _release_chat(chat)

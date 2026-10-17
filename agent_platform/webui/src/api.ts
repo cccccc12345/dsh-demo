@@ -28,6 +28,11 @@ export const api = {
 
   agents: () => fetchJson<AgentRoster>("/api/agents"),
 
+  stopAll: () =>
+    fetchJson<{ ok: boolean; stopped: boolean; message: string }>("/api/stop", {
+      method: "POST",
+    }),
+
   chats: () => fetchJson<ChatSummary[]>("/api/chats"),
 
   createChat: () =>

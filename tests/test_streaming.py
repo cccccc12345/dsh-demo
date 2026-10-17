@@ -63,6 +63,20 @@ class StreamingTranslationTest(unittest.TestCase):
             )
         )
 
+    def test_usage_chunk_is_translated(self) -> None:
+        event = stream(
+            {
+                "type": "chunk",
+                "attemptId": "session-root:1",
+                "chunk": {
+                    "type": "usage",
+                    "usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
+                },
+            }
+        )
+        self.assertEqual(event["type"], "usage")
+        self.assertEqual(event["usage"]["outputTokens"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

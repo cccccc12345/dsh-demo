@@ -5,8 +5,9 @@ import { Flow } from "./components/Flow";
 import { Rail } from "./components/Rail";
 import { TeamDock } from "./components/TeamDock";
 import { TopBar } from "./components/TopBar";
+import { TrajectoryDock } from "./components/TrajectoryDock";
 import { useTheme } from "./lib/theme";
-import type { Block, ChatSummary, ChildGroup, ConfigInfo, TeamPanel, TranscriptEntry, TurnEvent } from "./types";
+import type { Block, ChatSummary, ChildGroup, ConfigInfo, TeamPanel, TrajectoryEvent, TranscriptEntry, TurnEvent } from "./types";
 
 const AGENT_LABEL = { coder: "👨‍💻 Coder", reviewer: "🔍 Reviewer" } as const;
 
@@ -16,6 +17,35 @@ interface TurnState {
 }
 
 const EMPTY_TURN: TurnState = { blocks: [], children: [] };
+
+const TRAJECTORY_KEY = "agentbox-trajectory:";
+const TRAJECTORY_LIMIT = 500;
+const TRAJECTORY_SKIP = new Set([
+  "assistant_delta",
+  "assistant_stream_start",
+  "assistant_stream_end",
+  "chat_title",
+  "done",
+]);
+
+function loadTrajectory(chatId: string): TrajectoryEvent[] {
+  try {
+    const raw = sessionStorage.getItem(TRAJECTORY_KEY + chatId);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as TrajectoryEvent[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTrajectory(chatId: string, events: TrajectoryEvent[]): void {
+  try {
+    sessionStorage.setItem(TRAJECTORY_KEY + chatId, JSON.stringify(events));
+  } catch {
+    // 存储满了也不影响主流程。
+  }
+}
 
 function phaseStageLabel(stage: string | undefined, round: number | undefined): string {
   return stage === "start"
@@ -299,6 +329,17 @@ function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
       break;
 
     case "end": {
+      if (ev.finish_reason === "stopped") {
+        // runtime 被硬中断时不会有 assistant_stream_end/最终 message;
+        // 清掉空的流式占位块,给用户一个明确的停止提示。
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          const block = blocks[i];
+          if (block.kind === "message" && !block.text) blocks.splice(i, 1);
+        }
+        blocks.push({ kind: "note", text: "⏹️ 已停止全部任务" });
+        ctx.onTeamPanel((p) => (p ? { ...p, coderStage: "done", reviewerStage: "done" } : p));
+        break;
+      }
       const hasMain = blocks.some((b) => b.kind === "message" && !b.agent);
       if (ev.response) {
         if (!hasMain) blocks.push({ kind: "message", text: ev.response });
@@ -322,10 +363,13 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
   const [turn, setTurn] = useState<TurnState>(EMPTY_TURN);
+  const [trajectory, setTrajectory] = useState<TrajectoryEvent[]>([]);
+  const trajectoryRef = useRef<Record<string, TrajectoryEvent[]>>({});
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("");
   const [team, setTeam] = useState<ComposerProps["team"]>(null);
   const [dockOpen, setDockOpen] = useState(false);
+  const [dockTab, setDockTab] = useState<"team" | "trajectory">("team");
   const [notice, setNotice] = useState<{ kind: "err" | "info"; text: string } | null>(null);
   const [connError, setConnError] = useState<string | null>(null);
 
@@ -361,6 +405,9 @@ export default function App() {
       setActiveId(id);
       activeRef.current = id;
       setTurn(EMPTY_TURN);
+      const storedTrajectory = trajectoryRef.current[id] ?? loadTrajectory(id);
+      trajectoryRef.current[id] = storedTrajectory;
+      setTrajectory(storedTrajectory);
       try {
         const data = await api.chat(id);
         setEntries(data.transcript || []);
@@ -381,6 +428,8 @@ export default function App() {
       activeRef.current = chat.id;
       setEntries([]);
       setTurn(EMPTY_TURN);
+      trajectoryRef.current[chat.id] = [];
+      setTrajectory([]);
       void sendTurn(chat.id, firstText ?? "", teamReq); // eslint-disable-line @typescript-eslint/no-floating-promises
     },
     // sendTurn 在下方声明,使用函数提升不适用;存在前向依赖,这里以 ref 传递
@@ -397,6 +446,13 @@ export default function App() {
           activeRef.current = null;
           setEntries([]);
           setTurn(EMPTY_TURN);
+          setTrajectory([]);
+        }
+        delete trajectoryRef.current[id];
+        try {
+          sessionStorage.removeItem(TRAJECTORY_KEY + id);
+        } catch {
+          /* ignore */
         }
         setChats((prev) => prev.filter((c) => c.id !== id));
       } catch (e) {
@@ -424,17 +480,34 @@ export default function App() {
       setStatus("Agent 启动中…");
       if (teamReq) {
         setTeam({ timeline: [] });
+        setDockTab("team");
         setDockOpen(true);
       }
 
       let titleSeen = false;
+      const record = (ev: TurnEvent) => {
+        if (TRAJECTORY_SKIP.has(ev.type)) return;
+        const entry: TrajectoryEvent = { ...ev, ts: Date.now() };
+        const current = trajectoryRef.current[chatId] ?? [];
+        const next = [...current, entry].slice(-TRAJECTORY_LIMIT);
+        trajectoryRef.current[chatId] = next;
+        saveTrajectory(chatId, next);
+        if (activeRef.current === chatId) setTrajectory(next);
+      };
       const apply = (ev: TurnEvent) => {
+        record(ev);
         if (ev.type === "chat_title" && ev.title && !titleSeen) {
           titleSeen = true;
           setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, title: ev.title! } : c)));
           document.title = `${ev.title} · AgentBox`;
         }
-        setTurn((prev) => reduceTurn(prev, ev, { setStatus, onTeamPanel: setTeam, openDock: () => setDockOpen(true) }));
+        setTurn((prev) =>
+          reduceTurn(prev, ev, {
+            setStatus,
+            onTeamPanel: setTeam,
+            openDock: () => setDockOpen(true),
+          }),
+        );
       };
 
       try {
@@ -475,6 +548,25 @@ export default function App() {
     void createChat();
   }, [createChat]);
 
+  const toggleDock = useCallback(
+    (tab: "team" | "trajectory") => {
+      setDockTab(tab);
+      setDockOpen((open) => (dockTab === tab ? !open : true));
+    },
+    [dockTab],
+  );
+
+  const stopAll = useCallback(async () => {
+    setStatus("正在停止全部任务…");
+    try {
+      const res = await api.stopAll();
+      showToast(res.message || "全部任务已停止");
+    } catch (e) {
+      setStatus("");
+      showToast(`停止失败:${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [showToast]);
+
   const runningChatId = running && activeId ? activeId : null;
 
   return (
@@ -498,7 +590,9 @@ export default function App() {
           running={running}
           streaming={config?.streaming}
           dockOpen={dockOpen}
-          onToggleDock={() => setDockOpen((v) => !v)}
+          dockTab={dockTab}
+          onToggleDock={toggleDock}
+          onStopAll={() => void stopAll()}
           theme={theme}
           onToggleTheme={toggle}
         />
@@ -526,7 +620,11 @@ export default function App() {
         />
         <Composer disabled={!activeId && !connError && !config} running={running} onSubmit={handleSend} team={team} />
       </main>
-      <TeamDock open={dockOpen} data={team} />
+      {dockTab === "team" ? (
+        <TeamDock open={dockOpen} data={team} />
+      ) : (
+        <TrajectoryDock open={dockOpen} events={trajectory} />
+      )}
       {notice && <div className="toast">{notice.text}</div>}
     </div>
   );

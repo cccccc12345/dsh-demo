@@ -70,6 +70,7 @@ export interface TurnEvent {
     | "assistant_stream_start"
     | "assistant_delta"
     | "assistant_stream_end"
+    | "usage"
     | "message"
     | "reasoning"
     | "error"
@@ -99,7 +100,20 @@ export interface TurnEvent {
   verdict?: "APPROVE" | "NEEDS_CHANGES";
   response?: string;
   finish_reason?: string;
+  reason?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    cacheReadTokens?: number;
+    reasoningTokens?: number;
+  };
   message?: string;
+}
+
+export interface TrajectoryEvent extends TurnEvent {
+  /** 客户端收到事件的时间(毫秒) */
+  ts: number;
 }
 
 /** Agent 角色标签 */

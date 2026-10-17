@@ -6,13 +6,15 @@ interface TopBarProps {
   running: boolean;
   streaming?: boolean;
   dockOpen: boolean;
-  onToggleDock: () => void;
+  dockTab: "team" | "trajectory";
+  onToggleDock: (tab: "team" | "trajectory") => void;
+  onStopAll: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
 }
 
 export function TopBar(props: TopBarProps) {
-  const { chat, status, running, streaming, dockOpen, onToggleDock, theme, onToggleTheme } = props;
+  const { chat, status, running, streaming, dockOpen, dockTab, onToggleDock, onStopAll, theme, onToggleTheme } = props;
   return (
     <header className="topbar">
       <div className="topbar-title">{chat ? chat.title : "选择一个会话"}</div>
@@ -27,12 +29,24 @@ export function TopBar(props: TopBarProps) {
         </div>
       )}
       <div className="topbar-spacer" />
+      {running && (
+        <button className="topbar-btn stop-all" onClick={onStopAll} title="停止全部任务">
+          ⏹ 停止全部
+        </button>
+      )}
       <button
-        className={`topbar-btn${dockOpen ? " on" : ""}`}
-        onClick={onToggleDock}
+        className={`topbar-btn${dockOpen && dockTab === "team" ? " on" : ""}`}
+        onClick={() => onToggleDock("team")}
         title="团队面板"
       >
         👥 团队
+      </button>
+      <button
+        className={`topbar-btn${dockOpen && dockTab === "trajectory" ? " on" : ""}`}
+        onClick={() => onToggleDock("trajectory")}
+        title="查看 turn / step / tool 轨迹"
+      >
+        🧭 轨迹
       </button>
       <button className="topbar-btn" onClick={onToggleTheme} title="切换主题">
         {theme === "dark" ? "🌙" : "☀️"}

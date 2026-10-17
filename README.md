@@ -156,6 +156,43 @@ assistant_stream_end
 之后 runtime 内的 assistant-stream 转发不需要再重启。`GET /api/config` 的 `streaming` 字段表示是否启用。
 如果插件加载失败,前端会自动退回"完整消息一次性出现"的旧行为。
 
+## 轨迹视图
+
+顶栏的 `🧭 轨迹` 打开右侧轨迹抽屉,按事件顺序记录:
+
+- `USER` / `Turn` / `Step`
+- 工具调用与结果,含调用耗时
+- Assistant 消息与 reasoning 摘要
+- 团队模式的 phase / verdict / 子代理启动结束
+- token usage(`input / output / cached`)
+- 结束原因(completed / stopped / error)
+
+顶部汇总显示 turns、steps、tools、output tokens 和总耗时。轨迹按 chat 存在
+`sessionStorage`,刷新页面仍可见;删除 chat 或换浏览器会清空。
+
+这是官方 Trajectory 的简化版:官方还会展示完整 session event、请求 header、
+system prompt、工具 schema、TTFT/生成耗时拆分等,这些数据当前 Python SDK
+的 wire 没有暴露,所以这里用 SSE 事件 + 客户端到达时间近似。
+
+## 停止全部任务
+
+运行中时顶栏会出现 `⏹ 停止全部`,对应:
+
+```text
+POST /api/stop
+```
+
+语义是**硬停止**:
+
+- 终止共享的 dsh runtime 子进程,当前所有会话、团队角色和子代理立即中断;
+- 正在流式输出的 SSE 会收到 `finish_reason=stopped`,前端显示"已停止全部任务";
+- runtime 在**下一条消息**到来时自动重启;
+- 被中断的 chat 会走已有的 runtime 会话失效恢复逻辑(新建 runtime session 并注入最近对话)。
+
+当前没有"只停止某个 chat、保留其他任务"的优雅取消:Python SDK 的 wire 协议没有
+`session/cancel` / prompt-cancel 方法。需要单会话取消时,要走 dsh 的 Web host API
+或额外的 cancel bridge 插件。
+
 ## 冒烟测试
 
 ```bash
@@ -172,4 +209,4 @@ assistant_stream_end
 - 不建议用 `uvicorn --reload` 跑这个后端:reload 会关闭 runtime,正在进行的 SSE 会收到 `TransportClosedError`;前端调试请单独用 Vite,后端改代码后手动重启。
 - 无鉴权,不要暴露到公网;agent 有 bash 权限,工作目录即沙箱边界。
 - 每 turn 一个线程阻塞等待 `session.status == idle`,并发上限 = 线程池(8)+ runtime 自身能力。
-- 未实现中途打断(stop);dsh 协议如有 interrupt 方法可在 `agent_platform/main.py` 加端点。
+- 停止是"全部停止"(硬中断 runtime);单 chat / 单 turn 的优雅取消尚未实现,因为 Python SDK wire 没有 `session/cancel`。
