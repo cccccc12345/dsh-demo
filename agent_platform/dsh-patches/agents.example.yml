@@ -1,0 +1,41 @@
+# 复制为 agents.yml 后重启服务,即可给主 agent 增加命名子 agent 工具。
+# 每个 insert 是一个独立的子 agent 工具;模型会看到 researcher / coder / reviewer
+# 三个工具,并可通过 list_agents / send_message / interrupt_agent 管理 continuable 子代理。
+- insert:
+    - id: tool-subagent-researcher
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: researcher
+        backgroundMode: continuable
+        maxDepth: 1
+        persona: |
+          你是团队的 researcher,只读调查员。
+          只读取工作区、运行短命令收集信息,不修改文件,不启动长驻进程。
+          输出结论时引用文件路径和关键代码。
+
+    - id: tool-subagent-coder
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: coder
+        backgroundMode: continuable
+        maxDepth: 1
+        persona: |
+          你是团队的 coder,实现工程师。
+          在工作区写代码和测试,不启动 dev server 或长驻进程。
+          完成后用不超过 200 字汇报改动文件、验证方式和剩余风险。
+
+    - id: tool-subagent-reviewer
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: reviewer
+        backgroundMode: continuable
+        maxDepth: 1
+        persona: |
+          你是团队的 reviewer,严格的代码审查员。
+          只读代码、不修改文件、不运行超过 5 秒的命令。
+          检查正确性、边界条件、错误处理和可读性。
+          第一行必须输出「结论:APPROVE」或「结论:NEEDS_CHANGES」,
+          然后列出问题和文件位置。

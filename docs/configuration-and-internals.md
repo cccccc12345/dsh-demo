@@ -560,6 +560,138 @@ return { reviewed: reviews.length }
 | 原生 `subagent` | 模型 | 一两个独立委派 |
 | 原生 `workflow` | 模型写 JS | 大量并行子任务、审计、迁移、多角度调研 |
 
+### 6.5 自定义子 agent / 主从关系
+
+如果你希望主 agent 自己决定把任务交给 `researcher`、`coder`、`reviewer`,而不是平台写死 coder→reviewer,可以给每个角色挂一个**命名 subagent 工具**。
+
+最小配置见 `agent_platform/dsh-patches/agents.example.yml`:
+
+```yaml
+- insert:
+    - id: tool-subagent-researcher
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: researcher
+        backgroundMode: continuable
+        maxDepth: 1
+        persona: |
+          你是团队的 researcher,只读调查员...
+    - id: tool-subagent-coder
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: coder
+        backgroundMode: continuable
+        maxDepth: 1
+        persona: |
+          你是团队的 coder,实现工程师...
+    - id: tool-subagent-reviewer
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: reviewer
+        backgroundMode: continuable
+        maxDepth: 1
+        persona: |
+          你是团队的 reviewer...
+```
+
+启用:
+
+```bash
+cp agent_platform/dsh-patches/agents.example.yml agent_platform/dsh-patches/agents.yml
+# 编辑 persona / maxDepth / 可选 toolFilter
+# 重启 uvicorn
+```
+
+`main.py` 会自动把 `agents.yml` 加进 runtime patch:
+
+```python
+if SUBAGENTS_PATCH.is_file():
+    runtime_patches.append(str(SUBAGENTS_PATCH))
+```
+
+#### 关键字段
+
+| 字段 | 作用 |
+|---|---|
+| `provider` | 子 agent 后端,本平台用 `spawn` |
+| `toolName` | 模型看到的工具名,例如 `researcher` |
+| `backgroundMode` | `continuable`:后台持久子 agent,可用 `send_message` 追问;`one-shot`:调用即等待结果 |
+| `persona` | 子 agent 的角色指令 |
+| `maxDepth` | 子 agent 还能不能再派生子 agent;`0` 禁止,`1` 只允许一层 |
+| `toolFilter` | 限制子 agent 的全局工具,例如 `deny: ['write', 'edit']` |
+| `agentOptions` | 子 agent 的 provider/model/reasoningEffort/maxTokens;不写则继承父 agent 的兼容路由 |
+
+#### 主从关系
+
+- `backgroundMode: continuable` 时,父 agent 调用 `coder("...")` 会得到子 agent id,主 turn 可以继续做别的事。
+- 父 agent 可用 `list_agents` 查看自己启动的 continuable 子代理。
+- 父 agent 可用 `send_message(agent_id, message)` 给直接子代理追加任务。
+- 父 agent 可用 `interrupt_agent(agent_id)` 停止某个子代理的当前 turn,但保留它的会话。
+- `list_agents(scope="descendants")` 能看整棵子代理树;`send_message` 只能直接父子,兄弟之间不能互发。
+- `maxDepth` 控制树深;`toolFilter` 可以给 reviewer 做“只读”约束。
+
+这就形成了一个原生的主从树:
+
+```text
+main agent
+  ├── researcher (continuable, 只读)
+  ├── coder       (continuable, 可写)
+  └── reviewer    (continuable, 只读审查)
+```
+
+#### 固定 workflow / DAG
+
+如果流程是确定的,例如“并行调研 3 个方向 → 汇总 → 实现 → 审查”,不要让主 agent 自由发挥,直接用原生 `workflow` 工具写脚本:
+
+```js
+const research = await parallel([
+  () => agent('调研 dsh 的 session 持久化'),
+  () => agent('调研 dsh 的 subagent 机制'),
+  () => agent('调研 dsh 的 workflow 引擎'),
+])
+
+phase('implement')
+const code = await agent(`根据以下调研实现最小 demo:\n${JSON.stringify(research)}`)
+
+phase('review')
+const review = await agent(`审查实现:\n${code}`)
+
+return { research, code, review }
+```
+
+`workflow` 适合一次性 DAG;`continuable` 命名 subagent 适合长期主从关系。两者可以组合:主 agent 用 `workflow` 做批量编排,用命名 subagent 做需要多轮追问的角色。
+
+#### 让模型知道有哪些子 agent
+
+仅挂工具还不够。工具有名字,但模型不一定知道何时用。建议二选一:
+
+1. 在 `agent_platform/skills/` 加一个 `subagents/SKILL.md`,写清每个工具的职责和使用时机;
+2. 或在 `workflows.json`/平台 prompt 里加一段名册(当前平台只内置 coder/reviewer,自定义工具需要自己补 prompt)。
+
+推荐用 skill,因为 skill 是模型可发现的,且与工具配置解耦。
+
+#### 和当前团队模式的关系
+
+当前团队模式是**平台侧 root session 编排**:
+
+```text
+lead(root) → coder(root) → reviewer(root)
+```
+
+命名 subagent 是**父 agent 内的子会话树**:
+
+```text
+main(root) → coder(child) / reviewer(child)
+```
+
+两者不要混用同一套角色名,否则模型会混淆“平台角色”和“子代理工具”。如果要迁移,建议:
+
+- 保留平台团队模式作为稳定的质量门禁;
+- 另建一个“自由编排”模式,启用 `agents.yml`,主 agent 自己调用子 agent。
+
 ---
 
 ## 7. 轨迹

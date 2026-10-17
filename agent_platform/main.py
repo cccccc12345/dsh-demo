@@ -40,6 +40,10 @@ SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 SKILLS_PATCH = Path(__file__).resolve().parent / "dsh-patches" / "skills.yml"
 MCP_PATCH = Path(__file__).resolve().parent / "dsh-patches" / "mcp.yml"
 MCP_EXAMPLE_PATCH = Path(__file__).resolve().parent / "dsh-patches" / "mcp.example.yml"
+SUBAGENTS_PATCH = Path(__file__).resolve().parent / "dsh-patches" / "agents.yml"
+SUBAGENTS_EXAMPLE_PATCH = (
+    Path(__file__).resolve().parent / "dsh-patches" / "agents.example.yml"
+)
 STREAM_FORWARDER = (
     Path(__file__).resolve().parent
     / "dsh-plugins"
@@ -1031,6 +1035,8 @@ async def lifespan(_app: FastAPI):
         runtime_env["DSH_SKILLS_DIR"] = str(SKILLS_DIR)
     if MCP_PATCH.is_file():
         runtime_patches.append(str(MCP_PATCH))
+    if SUBAGENTS_PATCH.is_file():
+        runtime_patches.append(str(SUBAGENTS_PATCH))
     streaming_enabled = STREAM_FORWARDER.is_file()
     if streaming_enabled:
         try:
