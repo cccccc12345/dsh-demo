@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from agent_platform.main import _ensure_harness, _harness_alive, state
+from agent_platform.agent.runtime import RuntimeManager, harness_alive
+from agent_platform.agent.service import AgentService
 
 
 class _Proc:
@@ -28,51 +29,44 @@ class _Harness:
 
 
 class RuntimeRecoveryTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.previous = (
-            state.harness,
-            state.harness_factory,
-            state.mock_mode,
-            state.shutting_down,
-            state.startup_error,
-        )
-
-    def tearDown(self) -> None:
-        (
-            state.harness,
-            state.harness_factory,
-            state.mock_mode,
-            state.shutting_down,
-            state.startup_error,
-        ) = self.previous
-
     def test_alive_detection(self) -> None:
-        self.assertTrue(_harness_alive(_Harness(None)))
-        self.assertFalse(_harness_alive(_Harness(0)))
-        self.assertFalse(_harness_alive(None))
+        self.assertTrue(harness_alive(_Harness(None)))
+        self.assertFalse(harness_alive(_Harness(0)))
+        self.assertFalse(harness_alive(None))
 
     def test_dead_runtime_is_restarted(self) -> None:
         dead = _Harness(0)
         live = _Harness(None)
-        state.harness = dead  # type: ignore[assignment]
-        state.harness_factory = lambda: live  # type: ignore[assignment]
-        state.mock_mode = False
-        state.shutting_down = False
+        runtime = RuntimeManager(
+            harness=dead, factory=lambda: live, log=lambda _message: None
+        )
 
-        result = _ensure_harness()
+        result = runtime.ensure()
 
         self.assertIs(result, live)
         self.assertTrue(live.started)
         self.assertTrue(dead.closed)
-        self.assertIs(state.harness, live)
+        self.assertTrue(runtime.alive)
+
+    def test_shutting_down_never_restarts_runtime(self) -> None:
+        runtime = RuntimeManager(
+            factory=lambda: self.fail("should not start"),
+            log=lambda _message: None,
+        )
+        runtime.shutting_down = True
+
+        self.assertIsNone(runtime.ensure())
 
     def test_mock_mode_never_starts_runtime(self) -> None:
-        state.harness = None
-        state.harness_factory = lambda: self.fail("should not start")  # type: ignore[assignment]
-        state.mock_mode = True
-        state.shutting_down = False
+        service = AgentService(
+            runtime=RuntimeManager(
+                factory=lambda: self.fail("should not start"),
+                log=lambda _message: None,
+            )
+        )
+        service.mock_mode = True
 
-        self.assertIsNone(_ensure_harness())
+        self.assertIsNone(service._ensure_runtime())
 
 
 if __name__ == "__main__":

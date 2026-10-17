@@ -4,7 +4,8 @@ import unittest
 
 from deepseek_harness.models import Notification
 
-from agent_platform.main import STREAM_FORWARDER, translate_notification
+from agent_platform.agent.config import STREAM_FORWARDER
+from agent_platform.agent.events import translate_notification
 
 
 def stream(frame: dict, session_id: str = "session-root") -> dict | None:

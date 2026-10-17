@@ -1,4 +1,4 @@
-/** 与 agent_platform/main.py 的 API 契约一一对应 */
+/** 与 agent_platform/web 的 API 契约一一对应 */
 
 export interface AgentSpecInfo {
   id: string;

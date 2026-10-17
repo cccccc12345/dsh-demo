@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import time
 import unittest
 from types import SimpleNamespace
 
-from agent_platform.main import Chat, _stop_all_runtime, state
+from agent_platform.agent.runtime import RuntimeManager
+from agent_platform.agent.service import AgentService
+from agent_platform.workflows import default_workflow
 
 
 class _Proc:
@@ -25,38 +26,37 @@ class _Proc:
         self.killed = True
 
 
+def _service(harness: object | None = None) -> tuple[AgentService, RuntimeManager]:
+    runtime = RuntimeManager(harness=harness, log=lambda _message: None)  # type: ignore[arg-type]
+    return (
+        AgentService(runtime=runtime, workflow=default_workflow()),
+        runtime,
+    )
+
+
 class StopAllTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.previous_harness = state.harness
-        self.previous_chats = state.chats
-        state.chats = {}
-
-    def tearDown(self) -> None:
-        state.harness = self.previous_harness
-        state.chats = self.previous_chats
-
     def test_stop_all_sets_flags_and_terminates_runtime(self) -> None:
-        chat = Chat(id="chat-stop", title="", created_at=time.time())
-        state.chats = {chat.id: chat}
         proc = _Proc()
-        state.harness = SimpleNamespace(client=SimpleNamespace(_proc=proc))  # type: ignore[assignment]
+        harness = SimpleNamespace(client=SimpleNamespace(_proc=proc))
+        service, runtime = _service(harness)
+        chat = service.get_or_create_chat("chat-stop")
 
-        stopped = _stop_all_runtime()
+        stopped = service.stop_all()
 
         self.assertTrue(stopped)
         self.assertTrue(chat.stop_requested)
         self.assertTrue(proc.terminated)
-        self.assertIsNone(state.harness)
+        self.assertFalse(runtime.alive)
 
     def test_stop_all_without_runtime_still_marks_chats(self) -> None:
-        chat = Chat(id="chat-stop", title="", created_at=time.time())
-        state.chats = {chat.id: chat}
-        state.harness = None
+        service, runtime = _service()
+        chat = service.get_or_create_chat("chat-stop")
 
-        stopped = _stop_all_runtime()
+        stopped = service.stop_all()
 
         self.assertFalse(stopped)
         self.assertTrue(chat.stop_requested)
+        self.assertFalse(runtime.alive)
 
 
 if __name__ == "__main__":

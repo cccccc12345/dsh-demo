@@ -249,7 +249,7 @@ Web 面严格分两半:`host`(Node 侧 GUI 服务)与 `client`(浏览器侧 shel
   - `deepseek-harness-runtime-bin` / `deepseek_harness_runtime`:打包好的 dsh CLI 可执行 + 原生 sidecar,即"runtime 轮子"。
   - 行为:SDK 启动匹配的 `dsh --profile sdk` runtime 子进程,通过 **newline-delimited JSON-RPC over stdio** 通信;Python 只暴露"选 profile + 有序 patch 文件",不暴露完整 Cordis 树;**每次启动必须显式指定 Harness home**,绝不静默读 `~/.dsh`;持久化外部插件通过 `dsh plugin` 安装。
 
-**本仓库对接方式**:`agent_platform/main.py`(FastAPI)用这套 Python SDK——进程启动时拉起共享的 dsh runtime 子进程(agent 工作目录 = `.dsh-workspace/`,runtime 状态 = `.dsh-home/`),每个平台会话对应一个 `session-<uuid>` runtime session,把 runtime 通知翻译成 SSE 流(工具芯片 / 推理折叠 / 子代理渠道 / 进度文案)。`smoke.py` 跑一轮 turn 并 dump 全部事件词汇表,可直接对照 `upstream/docs/agent-lifecycle.md` 理解事件面。
+**本仓库对接方式**:`agent_platform/agent/`(agent 核心)+ `agent_platform/web/`(FastAPI 适配层)用这套 Python SDK——进程启动时拉起共享的 dsh runtime 子进程(agent 工作目录 = `.dsh-workspace/`,runtime 状态 = `.dsh-home/`),每个平台会话对应一个 `session-<uuid>` runtime session,把 runtime 通知翻译成 SSE 流(工具芯片 / 推理折叠 / 子代理渠道 / 进度文案)。`smoke.py` 跑一轮 turn 并 dump 全部事件词汇表,可直接对照 `upstream/docs/agent-lifecycle.md` 理解事件面。
 
 ## 12. 工程与质量体系
 
@@ -273,6 +273,6 @@ Web 面严格分两半:`host`(Node 侧 GUI 服务)与 `client`(浏览器侧 shel
 | 写一个插件/包 | `docs/cookbook/adding-a-package.md` → `packages/AGENTS.md` |
 | 加一个模型工具 | `docs/cookbook/adding-a-tool.md`(含 UI 卡片设计) |
 | 接一个新模型 provider | `docs/cookbook/adding-an-llm-adapter.md` |
-| 用 Python 驱动 harness | `python/sdk/README.md` → 本仓库 `agent_platform/main.py` |
+| 用 Python 驱动 harness | `python/sdk/README.md` → 本仓库 `agent_platform/agent/service.py` |
 | 理解事件与 turn 细节 | `docs/agent-lifecycle.md` + `docs/subsystems/core.md` |
 | 跑起来看看 | 本仓 `upstream/agentbox.sh`(Web,patched)或 `agent_platform`(`.venv/bin/uvicorn agent_platform.main:app`) |

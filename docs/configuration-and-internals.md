@@ -10,7 +10,10 @@
 Browser (React)
    │  HTTP + SSE
    ▼
-FastAPI (agent_platform/main.py)
+FastAPI (agent_platform/web/)
+   │  调用 AgentService(唯一门面)
+   ▼
+Agent 核心 (agent_platform/agent/)
    │  Python SDK: session/prompt, notifications
    ▼
 DeepSeekHarness (deepseek_harness)
@@ -24,9 +27,16 @@ dsh runtime (Node, --profile sdk)
    └── 自定义插件: assistant-stream-forwarder
 ```
 
+代码分层：
+
+- `agent_platform/agent/` 是 agent 核心，不知道 HTTP/SSE 的存在，也不导入 FastAPI；
+  负责 runtime 生命周期、会话、turn、团队编排和通知翻译。
+- `agent_platform/web/` 是适配层，只调用 `AgentService`，负责路由、SSE 编码和静态资源。
+- `agent_platform/main.py` 只做 `app = create_app()`，依赖方向始终是 `web → agent`。
+
 关键点：
 
-- FastAPI **不直接调用模型**，只负责会话、SSE、任务编排和事件翻译。
+- FastAPI **不直接调用模型**，也不直接操作 runtime；会话、任务编排和事件翻译都在 agent 核心。
 - 真正的 agent loop、工具执行、上下文和持久化都在 dsh runtime 里。
 - dsh 的插件树通过 **profile bundle + patch** 组合；平台自己的定制都尽量放在 patch/plugin 层，不 fork 上游。
 - 同一个 runtime 被所有平台 chat 共享；runtime 退出时，下一条消息会自动重启（见第 8 节）。
@@ -48,7 +58,7 @@ dsh runtime (Node, --profile sdk)
 | 轨迹 | 浏览器 `sessionStorage` | 当前浏览器的 per-chat 事件账本 |
 | runtime 状态 | `.dsh-home/` | profile、session、凭据、日志 |
 
-`agent_platform/main.py` 在启动时决定要加载哪些 patch：
+`agent_platform/agent/service.py` 在启动时决定要加载哪些 patch：
 
 ```python
 runtime_patches = []
@@ -106,7 +116,7 @@ patch 内容：
       - !!js process.env.DSH_SKILLS_DIR
 ```
 
-`main.py` 在启动 runtime 时注入：
+`agent_platform/agent/service.py` 在启动 runtime 时注入：
 
 ```python
 runtime_env["DSH_SKILLS_DIR"] = str(SKILLS_DIR)
@@ -197,7 +207,7 @@ description: 一句话说明这个 skill 做什么。
 EOF
 ```
 
-不需要改 `main.py`，也不需要重启 runtime。
+不需要改服务代码，也不需要重启 runtime。
 
 ---
 
@@ -284,7 +294,7 @@ mcp__memory__create_entities
 
 ### 4.5 平台如何加载 MCP patch
 
-`main.py` 里：
+`agent_platform/agent/config.py` 里：
 
 ```python
 MCP_PATCH = Path(__file__).resolve().parent / "dsh-patches" / "mcp.yml"
@@ -427,7 +437,7 @@ usage
 
 ### 5.6 插件如何加载
 
-`main.py` 在启动时生成：
+`agent_platform/agent/service.py` 在启动时生成：
 
 ```text
 $DSH_HOME/patches/streaming.yml
@@ -486,7 +496,7 @@ list_agents 只列你派生的 continuable 子代理,不列平台角色。
 
 ### 6.2 Lead 路由
 
-团队模式不是“所有输入都写代码”。`_run_team_turn` 先跑一个内部 lead：
+团队模式不是“所有输入都写代码”。`agent_platform/agent/team.py` 的 `run_team_turn` 先跑一个内部 lead：
 
 ```text
 用户请求
@@ -605,7 +615,7 @@ cp agent_platform/dsh-patches/agents.example.yml agent_platform/dsh-patches/agen
 # 重启 uvicorn
 ```
 
-`main.py` 会自动把 `agents.yml` 加进 runtime patch:
+`agent_platform/agent/service.py` 会自动把 `agents.yml` 加进 runtime patch:
 
 ```python
 if SUBAGENTS_PATCH.is_file():
@@ -741,7 +751,7 @@ POST /api/stop
 2. 终止共享 dsh runtime 子进程；
 3. 正在 `session.run` 的 worker 收到 `TransportClosedError`；
 4. worker 看到 `stop_requested` 后输出干净的 `end(finish_reason=stopped)`；
-5. 下一条消息由 `_ensure_harness()` 自动重启 runtime；
+5. 下一条消息由 `RuntimeManager.ensure()` 自动重启 runtime；
 6. 旧 runtime session 失效，下一条消息走“新建 runtime session + 注入最近对话”的恢复逻辑。
 
 为什么不做单会话优雅取消：
@@ -753,7 +763,7 @@ POST /api/stop
 
 ## 9. 运行时恢复
 
-`_ensure_harness()` 会在每次真实消息前检查：
+`RuntimeManager.ensure()` 会在每次真实消息前检查：
 
 ```python
 proc = harness.client._proc

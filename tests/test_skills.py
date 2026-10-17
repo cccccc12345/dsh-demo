@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_platform.main import SKILLS_DIR, SKILLS_PATCH
+from agent_platform.agent.config import SKILLS_DIR, SKILLS_PATCH
 
 
 class SkillsConfigTest(unittest.TestCase):

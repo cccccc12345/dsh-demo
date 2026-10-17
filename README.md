@@ -8,7 +8,20 @@
 
 ```
 agent_platform/
-├── main.py            # FastAPI 后端:SSE 流式、会话管理、事件翻译
+├── main.py            # 应用入口:uvicorn agent_platform.main:app
+├── agent/             # Agent 核心:runtime、会话、turn、团队编排,不依赖 FastAPI
+│   ├── service.py     # Web 层唯一门面 AgentService
+│   ├── runtime.py     # 共享 dsh runtime 生命周期(启动/重启/停止)
+│   ├── turns.py       # 普通对话 turn + Mock 剧本
+│   ├── team.py        # lead 路由 + coder/reviewer 编排
+│   ├── events.py      # runtime 通知 → 前端事件
+│   ├── prompts.py     # prompt 拼接与标题兜底
+│   ├── models.py      # Chat 模型
+│   └── config.py      # 路径、.env、patch 配置
+├── web/               # Web 适配层:只做 HTTP/SSE 与静态资源
+│   ├── app.py         # FastAPI 路由 + lifespan
+│   ├── sse.py         # 事件队列 → SSE
+│   └── static.py      # 静态资源 / SPA 入口
 ├── workflows.py       # 平台 agent 名册/团队 prompt 上下文
 ├── skills/            # 自定义 skill(SKILL.md,热更新)
 ├── dsh-patches/       # runtime patch(自定义 skill 根等)
@@ -18,6 +31,10 @@ agent_platform/
 └── webui/             # React + Vite 前端源码(仿 dsh 官方 AgentBox 风格)
     └── pnpm build     # 构建即写入 ../static,uvicorn 免重启
 ```
+
+依赖方向是单向的:`web → agent`。`agent/` 不导入 FastAPI/Starlette,可以脱离 Web
+单独实例化(`AgentService`)或做后端任务;`web/` 只调用 `AgentService` 的公开方法,
+不直接接触 runtime 和通知翻译。`main.py` 只负责 `create_app()`。
 
 ## 快速启动
 
@@ -85,7 +102,7 @@ open http://127.0.0.1:8765
 
 - `maxRounds` 控制 reviewer 打回后 coder 最多修复几轮(0–10)。
 - 当前平台编排器在 coding 路由下固定执行「coder 实现 → reviewer 审查 →(可选)coder 修复 → reviewer 复审」,
-  所以角色只支持 `coder` / `reviewer`;要支持任意角色图,需要扩展 `_run_team_turn`,
+  所以角色只支持 `coder` / `reviewer`;要支持任意角色图,需要扩展 `agent/team.py` 的 `run_team_turn`,
   或改用 dsh 原生的 `subagent` / `workflow` 工具。
 - 自定义 `name` / `emoji` 会进入 prompt 和 `GET /api/agents`,但前端团队面板暂时仍使用固定的
   Coder / Reviewer 标签;角色 `id` 始终是 `coder` / `reviewer`。
@@ -210,5 +227,5 @@ POST /api/stop
 - runtime 意外退出后,下一次请求会自动重启 runtime;重启失败返回 503,不会继续往已关闭的管道写请求。
 - 不建议用 `uvicorn --reload` 跑这个后端:reload 会关闭 runtime,正在进行的 SSE 会收到 `TransportClosedError`;前端调试请单独用 Vite,后端改代码后手动重启。
 - 无鉴权,不要暴露到公网;agent 有 bash 权限,工作目录即沙箱边界。
-- 每 turn 一个线程阻塞等待 `session.status == idle`,并发上限 = 线程池(8)+ runtime 自身能力。
+- 每 turn 一个 daemon 线程阻塞等待 runtime 进入 idle;SSE 侧用独立 8 线程池轮询事件队列,实际并发仍受 runtime 自身能力限制。
 - 停止是"全部停止"(硬中断 runtime);单 chat / 单 turn 的优雅取消尚未实现,因为 Python SDK wire 没有 `session/cancel`。

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_platform.main import MCP_EXAMPLE_PATCH
+from agent_platform.agent.config import MCP_EXAMPLE_PATCH
 
 
 class McpConfigTest(unittest.TestCase):

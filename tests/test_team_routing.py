@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import queue
-import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent_platform.main import Chat, LeadDecision, _run_team_turn, state
+from agent_platform.agent.models import Chat
+from agent_platform.agent.team import LeadDecision, run_team_turn
+from agent_platform.workflows import default_workflow
+
+WORKFLOW = default_workflow()
 
 
 def drain(q: queue.Queue) -> list[dict]:
@@ -19,27 +22,19 @@ def drain(q: queue.Queue) -> list[dict]:
 
 
 class TeamRoutingTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.previous_harness = state.harness
-        # direct-answer / mocked-phase paths never touch the runtime object.
-        state.harness = object()  # type: ignore[assignment]
-
-    def tearDown(self) -> None:
-        state.harness = self.previous_harness
-
     def test_general_question_skips_coder_and_reviewer(self) -> None:
-        chat = Chat(id="chat-test", title="", created_at=time.time())
+        chat = Chat(id="chat-test", title="", created_at=0)
         q: queue.Queue = queue.Queue()
         answer_result = SimpleNamespace(final_response="直接回答", finish_reason="completed")
         with (
             patch(
-                "agent_platform.main._run_lead_decision",
+                "agent_platform.agent.team.run_lead_decision",
                 return_value=LeadDecision(route="answer", plan="", answer="直接回答"),
             ),
-            patch("agent_platform.main._run_phase") as run_phase,
+            patch("agent_platform.agent.team.run_phase") as run_phase,
         ):
             run_phase.return_value = ("answer-sid", answer_result)
-            _run_team_turn("你有哪些 agent?", chat, q)
+            run_team_turn("你有哪些 agent?", chat, q, harness=object(), workflow=WORKFLOW)
 
         self.assertIsNone(run_phase.call_args.args[3])  # agent=None => 主流式
         events = drain(q)
@@ -49,20 +44,20 @@ class TeamRoutingTest(unittest.TestCase):
         self.assertEqual(chat.transcript[-1]["text"], "直接回答")
 
     def test_inspect_route_skips_reviewer(self) -> None:
-        chat = Chat(id="chat-test", title="", created_at=time.time())
+        chat = Chat(id="chat-test", title="", created_at=0)
         q: queue.Queue = queue.Queue()
         inspect_result = SimpleNamespace(
             final_response="文件里实现了四则运算", finish_reason="completed"
         )
         with (
             patch(
-                "agent_platform.main._run_lead_decision",
+                "agent_platform.agent.team.run_lead_decision",
                 return_value=LeadDecision(route="inspect", plan="读文件", answer=""),
             ),
-            patch("agent_platform.main._run_phase") as run_phase,
+            patch("agent_platform.agent.team.run_phase") as run_phase,
         ):
             run_phase.return_value = ("inspector-sid", inspect_result)
-            _run_team_turn("解释 simple_calculator.py", chat, q)
+            run_team_turn("解释 simple_calculator.py", chat, q, harness=object(), workflow=WORKFLOW)
 
         self.assertIsNone(run_phase.call_args.args[3])  # agent=None => 主对话流
         events = drain(q)
@@ -71,7 +66,7 @@ class TeamRoutingTest(unittest.TestCase):
         self.assertEqual(chat.transcript[-1]["text"], "文件里实现了四则运算")
 
     def test_coding_route_passes_plan_to_coder(self) -> None:
-        chat = Chat(id="chat-test", title="", created_at=time.time())
+        chat = Chat(id="chat-test", title="", created_at=0)
         q: queue.Queue = queue.Queue()
         coder_result = SimpleNamespace(final_response="coder 完成", finish_reason="completed")
         reviewer_result = SimpleNamespace(
@@ -79,13 +74,13 @@ class TeamRoutingTest(unittest.TestCase):
         )
         with (
             patch(
-                "agent_platform.main._run_lead_decision",
+                "agent_platform.agent.team.run_lead_decision",
                 return_value=LeadDecision(route="coding", plan="先读文件再实现", answer=""),
             ),
-            patch("agent_platform.main._run_phase") as run_phase,
+            patch("agent_platform.agent.team.run_phase") as run_phase,
         ):
             run_phase.side_effect = [("coder-sid", coder_result), ("reviewer-sid", reviewer_result)]
-            _run_team_turn("实现一个功能", chat, q)
+            run_team_turn("实现一个功能", chat, q, harness=object(), workflow=WORKFLOW)
 
         coder_prompt = run_phase.call_args_list[0].args[5]
         self.assertIn("lead 计划:先读文件再实现", coder_prompt)
