@@ -28,8 +28,28 @@ STREAM_FORWARDER = (
 )
 STREAM_PATCH_RUNTIME = DSH_HOME_DIR / "patches" / "streaming.yml"
 
+# 原生 function-calling 工具插件:
+# - tools.yml 是可选的手动 patch(高级用法);
+# - dsh-plugins/tools/*/index.js 会被自动发现并生成 local-tools.yml。
+TOOLS_PATCH = PACKAGE_DIR / "dsh-patches" / "tools.yml"
+LOCAL_TOOLS_DIR = PACKAGE_DIR / "dsh-plugins" / "tools"
+LOCAL_TOOLS_PATCH_RUNTIME = DSH_HOME_DIR / "patches" / "local-tools.yml"
+
+# 人工审批桥:runtime 插件 + 本地回调 server。
+APPROVAL_BRIDGE_PLUGIN = PACKAGE_DIR / "dsh-plugins" / "approval-bridge" / "index.js"
+APPROVAL_PATCH_RUNTIME = DSH_HOME_DIR / "patches" / "approval-bridge.yml"
+
 PROVIDER = os.environ.get("DSH_PROVIDER", "deepseek-official")
 MODEL = os.environ.get("DSH_MODEL", "deepseek-v4-flash")
+
+
+def discover_tool_plugins(directory: Path = LOCAL_TOOLS_DIR) -> list[Path]:
+    """发现 ``<dir>/<plugin>/index.js`` 形式的本地工具插件。"""
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path for path in directory.glob("*/index.js") if path.is_file()
+    )
 
 
 def load_env_file(path: Path) -> dict[str, str]:

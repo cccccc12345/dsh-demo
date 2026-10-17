@@ -1,0 +1,9 @@
+{
+  "name": "dsh-plugin-approval-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js",
+  "description": "Forward dsh approval/request to the agent platform for human approval"
+}

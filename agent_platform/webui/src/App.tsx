@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, streamTurn } from "./api";
+import { ApprovalBar } from "./components/ApprovalBar";
 import { Composer, type ComposerProps } from "./components/Composer";
 import { Flow } from "./components/Flow";
 import { Rail } from "./components/Rail";
@@ -7,7 +8,7 @@ import { TeamDock } from "./components/TeamDock";
 import { TopBar } from "./components/TopBar";
 import { TrajectoryDock } from "./components/TrajectoryDock";
 import { useTheme } from "./lib/theme";
-import type { Block, ChatSummary, ChildGroup, ConfigInfo, TeamPanel, TrajectoryEvent, TranscriptEntry, TurnEvent } from "./types";
+import type { Block, ChatSummary, ChildGroup, ConfigInfo, PendingApproval, TeamPanel, TrajectoryEvent, TranscriptEntry, TurnEvent } from "./types";
 
 const AGENT_LABEL = { coder: "👨‍💻 Coder", reviewer: "🔍 Reviewer" } as const;
 
@@ -372,6 +373,7 @@ export default function App() {
   const [dockTab, setDockTab] = useState<"team" | "trajectory">("team");
   const [notice, setNotice] = useState<{ kind: "err" | "info"; text: string } | null>(null);
   const [connError, setConnError] = useState<string | null>(null);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
 
   const runningRef = useRef(false);
   const activeRef = useRef<string | null>(null);
@@ -501,6 +503,29 @@ export default function App() {
           setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, title: ev.title! } : c)));
           document.title = `${ev.title} · AgentBox`;
         }
+        if (ev.type === "approval_request" && ev.approvalId) {
+          setApprovals((prev) => [
+            ...prev.filter((approval) => approval.id !== ev.approvalId),
+            {
+              id: ev.approvalId!,
+              chatId: ev.chatId,
+              toolName: ev.toolName || "tool",
+              callId: ev.callId,
+              reason: ev.reason,
+              timeoutSeconds: ev.timeoutSeconds,
+            },
+          ]);
+          setStatus("⏸ 等待人工审批…");
+          return;
+        }
+        if (ev.type === "approval_resolved" && ev.approvalId) {
+          setApprovals((prev) => prev.filter((approval) => approval.id !== ev.approvalId));
+          if (runningRef.current) setStatus("审批已处理,继续执行…");
+          return;
+        }
+        if (ev.type === "end") {
+          setApprovals((prev) => prev.filter((approval) => approval.chatId !== chatId));
+        }
         setTurn((prev) =>
           reduceTurn(prev, ev, {
             setStatus,
@@ -519,6 +544,7 @@ export default function App() {
         runningRef.current = false;
         setRunning(false);
         setStatus("");
+        setApprovals((prev) => prev.filter((approval) => approval.chatId !== chatId));
         try {
           const list = await api.chats();
           setChats(list);
@@ -560,12 +586,29 @@ export default function App() {
     setStatus("正在停止全部任务…");
     try {
       const res = await api.stopAll();
+      setApprovals([]);
       showToast(res.message || "全部任务已停止");
     } catch (e) {
       setStatus("");
       showToast(`停止失败:${e instanceof Error ? e.message : String(e)}`);
     }
   }, [showToast]);
+
+  const decideApproval = useCallback(
+    async (approvalId: string, decision: "approve" | "reject") => {
+      try {
+        const res = await api.resolveApproval(approvalId, decision);
+        setApprovals((prev) => prev.filter((approval) => approval.id !== approvalId));
+        showToast(
+          res.outcome === "allowed-once" ? "已批准本次工具调用" : "已拒绝本次工具调用",
+          "info",
+        );
+      } catch (e) {
+        showToast(`审批提交失败:${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [showToast],
+  );
 
   const runningChatId = running && activeId ? activeId : null;
 
@@ -618,6 +661,7 @@ export default function App() {
                 : "先在左侧新建一个会话,或点击＋开始。"
           }
         />
+        <ApprovalBar approvals={approvals} onDecide={(id, decision) => void decideApproval(id, decision)} />
         <Composer disabled={!activeId && !connError && !config} running={running} onSubmit={handleSend} team={team} />
       </main>
       {dockTab === "team" ? (

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from agent_platform.agent.service import (
     AgentService,
     AgentUnavailable,
+    ApprovalNotFound,
     ChatBusy,
     ChatNotFound,
 )
@@ -40,6 +41,10 @@ class MessageIn(BaseModel):
     text: str
 
 
+class ApprovalDecisionIn(BaseModel):
+    decision: str
+
+
 @router.get("/api/config")
 def api_config(service: ServiceDep) -> dict[str, Any]:
     return service.config()
@@ -59,6 +64,26 @@ def api_stop_all(service: ServiceDep) -> dict[str, Any]:
         "stopped": stopped,
         "message": "全部任务已停止;下一条消息会自动重启 runtime",
     }
+
+
+@router.get("/api/approvals")
+def api_list_approvals(service: ServiceDep) -> list[dict[str, Any]]:
+    """当前等待人工决定的审批。"""
+    return service.list_approvals()
+
+
+@router.post("/api/approvals/{approval_id}")
+def api_resolve_approval(
+    approval_id: str, body: ApprovalDecisionIn, service: ServiceDep
+) -> dict[str, Any]:
+    decision = body.decision.strip().lower()
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(400, "decision 必须是 approve 或 reject")
+    try:
+        outcome = service.resolve_approval(approval_id, decision == "approve")
+    except ApprovalNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"ok": True, "id": approval_id, "outcome": outcome}
 
 
 @router.get("/api/chats")

@@ -172,6 +172,27 @@ function buildRows(events: TrajectoryEvent[]): Row[] {
           tone: "child",
         });
         break;
+      case "approval_request":
+        rows.push({
+          key,
+          ts: event.ts,
+          icon: "🛡️",
+          label: `审批请求 · ${event.toolName || "tool"}`,
+          text: event.reason,
+          tone: "approval",
+          indent: 2,
+        });
+        break;
+      case "approval_resolved":
+        rows.push({
+          key,
+          ts: event.ts,
+          icon: event.outcome === "allowed-once" ? "✅" : "⛔",
+          label: `审批结果 · ${event.outcome || "unknown"}`,
+          tone: event.outcome === "allowed-once" ? "approve" : "reject",
+          indent: 2,
+        });
+        break;
       case "error":
         rows.push({
           key,

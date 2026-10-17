@@ -36,6 +36,10 @@ export interface ConfigInfo {
   workflow?: WorkflowInfo;
   runtimeAlive?: boolean;
   streaming?: boolean;
+  approval?: {
+    enabled: boolean;
+    timeoutSeconds: number;
+  };
 }
 
 export interface ChatSummary {
@@ -78,6 +82,8 @@ export interface TurnEvent {
     | "verdict"
     | "agent_spawn"
     | "agent_done"
+    | "approval_request"
+    | "approval_resolved"
     | "end";
   turn?: number;
   step?: number;
@@ -101,6 +107,11 @@ export interface TurnEvent {
   response?: string;
   finish_reason?: string;
   reason?: string;
+  approvalId?: string;
+  chatId?: string;
+  toolName?: string;
+  timeoutSeconds?: number;
+  outcome?: "allowed-once" | "rejected" | "cancelled" | "unavailable";
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
@@ -114,6 +125,15 @@ export interface TurnEvent {
 export interface TrajectoryEvent extends TurnEvent {
   /** 客户端收到事件的时间(毫秒) */
   ts: number;
+}
+
+export interface PendingApproval {
+  id: string;
+  chatId?: string;
+  toolName: string;
+  callId?: string;
+  reason?: string;
+  timeoutSeconds?: number;
 }
 
 /** Agent 角色标签 */

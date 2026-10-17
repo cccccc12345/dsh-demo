@@ -53,6 +53,11 @@ dsh runtime (Node, --profile sdk)
 | Skill 根目录 patch | `agent_platform/dsh-patches/skills.yml` | 把 `customSkillDirs` 指向仓库内 skills |
 | MCP | `agent_platform/dsh-patches/mcp.yml` | 每个 MCP server 一条配置 |
 | MCP 示例 | `agent_platform/dsh-patches/mcp.example.yml` | 复制为 `mcp.yml` 后启用 |
+| 原生工具插件 | `agent_platform/dsh-plugins/tools/<name>/` | 本地 function-calling 工具,启动时自动发现 |
+| 工具 patch(可选) | `agent_platform/dsh-patches/tools.yml` | 手动挂载工具插件(包或绝对 `file://` 路径) |
+| 工具 patch(auto) | 运行时生成到 `$DSH_HOME/patches/local-tools.yml` | 把本地工具插件注入 runtime |
+| 人工审批桥 | `agent_platform/dsh-plugins/approval-bridge/` | 把 dsh `approval/request` 转发到平台等待人工决定 |
+| 审批 patch(auto) | 运行时生成到 `$DSH_HOME/patches/approval-bridge.yml` | 让 runtime 加载审批桥 |
 | 流式插件 | `agent_platform/dsh-plugins/assistant-stream-forwarder/` | 转发 `agent/assistant-stream` |
 | 流式 patch | 运行时生成到 `$DSH_HOME/patches/streaming.yml` | 让 runtime 加载流式插件 |
 | 轨迹 | 浏览器 `sessionStorage` | 当前浏览器的 per-chat 事件账本 |
@@ -70,6 +75,10 @@ if MCP_PATCH.is_file():
 ```
 
 这些 patch 最终变成 dsh 的 `--patch` 参数。
+
+自定义 function calling 工具(原生插件、MCP、subagent 与 `text_stats` demo)的完整说明见
+[自定义工具](custom-tools.md)。人工审批(HITL)的实现、API 和 `guarded_echo` demo 见
+[人工审批](human-in-the-loop.md)。
 
 ---
 
@@ -748,11 +757,12 @@ POST /api/stop
 行为：
 
 1. 给所有 chat 标记 `stop_requested`；
-2. 终止共享 dsh runtime 子进程；
-3. 正在 `session.run` 的 worker 收到 `TransportClosedError`；
-4. worker 看到 `stop_requested` 后输出干净的 `end(finish_reason=stopped)`；
-5. 下一条消息由 `RuntimeManager.ensure()` 自动重启 runtime；
-6. 旧 runtime session 失效，下一条消息走“新建 runtime session + 注入最近对话”的恢复逻辑。
+2. 取消所有等待中的人工审批（按拒绝返回）；
+3. 终止共享 dsh runtime 子进程；
+4. 正在 `session.run` 的 worker 收到 `TransportClosedError`；
+5. worker 看到 `stop_requested` 后输出干净的 `end(finish_reason=stopped)`；
+6. 下一条消息由 `RuntimeManager.ensure()` 自动重启 runtime；
+7. 旧 runtime session 失效，下一条消息走“新建 runtime session + 注入最近对话”的恢复逻辑。
 
 为什么不做单会话优雅取消：
 

@@ -25,6 +25,8 @@ class Chat:
     reviewer_sid: str | None = None
     # 团队 lead(路由/直答)会话;和 coder/reviewer 分开,避免内部 JSON 污染角色上下文
     lead_sid: str | None = None
+    # 本 chat 见过的 runtime session id(含 subagent 子会话),用于把审批请求路由回正确会话
+    session_ids: set[str] = field(default_factory=set)
     # 全局"停止全部"会置位;worker 看到后输出干净的 stopped 结束事件
     stop_requested: bool = False
 

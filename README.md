@@ -2,7 +2,7 @@
 
 基于 `deepseek-harness` SDK 的一个最小可用的 Agent Web 平台:多会话聊天界面 + SSE 流式事件推送(工具调用、推理、最终回复)。
 
-**深入阅读:** [配置与原理](docs/configuration-and-internals.md) — skill、MCP、流式、workflow、停止、轨迹的实现细节。
+**深入阅读:** [配置与原理](docs/configuration-and-internals.md) — skill、MCP、流式、workflow、停止、轨迹的实现细节；[自定义工具](docs/custom-tools.md) — function calling、原生工具插件、MCP 与 demo；[人工审批](docs/human-in-the-loop.md) — HITL 审批桥、浏览器审批条与 `guarded_echo` demo。
 
 ## 结构
 
@@ -24,12 +24,21 @@ agent_platform/
 │   └── static.py      # 静态资源 / SPA 入口
 ├── workflows.py       # 平台 agent 名册/团队 prompt 上下文
 ├── skills/            # 自定义 skill(SKILL.md,热更新)
-├── dsh-patches/       # runtime patch(自定义 skill 根等)
-├── dsh-plugins/       # runtime 插件(assistant-stream 转发)
+├── dsh-patches/       # runtime patch(自定义 skill 根、MCP、subagent、tools 等)
+├── dsh-plugins/       # runtime 插件(assistant-stream 转发、人工审批桥)
+│   └── tools/         # 本地 function-calling 工具插件(自动发现)
 ├── static/            # 前端构建产物(webui 构建输出,勿手改)
 ├── static-legacy/     # 旧版原生 JS 前端留档
 └── webui/             # React + Vite 前端源码(仿 dsh 官方 AgentBox 风格)
     └── pnpm build     # 构建即写入 ../static,uvicorn 免重启
+```
+
+仓库根目录还包含:
+
+```text
+docs/custom-tools.md          # 自定义工具技术文档
+docs/human-in-the-loop.md     # 人工审批(HITL)技术文档
+demos/custom_tool_demo.py     # text_stats / guarded_echo 端到端 demo
 ```
 
 依赖方向是单向的:`web → agent`。`agent/` 不导入 FastAPI/Starlette,可以脱离 Web
@@ -54,7 +63,7 @@ cp .env.example .env
 open http://127.0.0.1:8765
 ```
 
-可选环境变量:`DSH_MODEL`(默认 `deepseek-v4-flash`)、`DSH_PROVIDER`(默认 `deepseek-official`)、`DEEPSEEK_BASE_URL`。
+可选环境变量:`DSH_MODEL`(默认 `deepseek-v4-flash`)、`DSH_PROVIDER`(默认 `deepseek-official`)、`DEEPSEEK_BASE_URL`;人工审批相关:`DSH_APPROVAL_BRIDGE`(默认 `1`)、`DSH_APPROVAL_TIMEOUT`(默认 `120` 秒)、`DSH_APPROVAL_TOOLS`(逗号分隔的强制审批工具)。
 
 ## 行为说明
 
@@ -78,6 +87,7 @@ open http://127.0.0.1:8765
   - `assistant/message` → 助手气泡(含 `reasoning` 折叠提示)
   - `subagent.*` / 子会话事件 → 🤖 子代理渠道(SDK runtime 原生支持 `subagent`/`workflow` 等多 agent 工具)
   - `turn/start`、`step/start` → 进度条文案;`turn/end`(错误时)→ 红色错误框
+  - `approval_request` / `approval_resolved` → 人工审批条 + 轨迹;决定通过 `POST /api/approvals/{id}` 提交
 - 同一会话正在跑 turn 时,再次发送返回 409;会话运行中禁止删除/切换。
 
 ## 自定义团队名册
@@ -143,6 +153,63 @@ whenToUse: 可选,补充触发场景。
 - 如果删除 `agent_platform/dsh-patches/skills.yml`,平台会回退到 dsh 默认 skill 根。
 - 仓库里的 `agent_platform/skills/example/SKILL.md` 是可直接替换的示例。
 
+## 自定义工具(Function Calling)
+
+模型看到的工具由 dsh runtime 注册,形式是 `name + description + parameters(JSON Schema)`,
+调用后由 runtime 执行;Web 层只负责转发 `tool/call` / `tool/result` 事件。
+`bash`、文件读写/搜索、`web`、`skill`、`subagent`、`workflow` 等已经是这种机制。
+
+新增自定义函数有三条路:
+
+- **原生工具插件(推荐本地函数)**: 把插件放到
+  `agent_platform/dsh-plugins/tools/<name>/index.js`。启动时平台会自动发现,生成
+  `$DSH_HOME/patches/local-tools.yml` 并加载;修改后重启 uvicorn。
+- **MCP server(接入已有服务最快)**: 复制 `agent_platform/dsh-patches/mcp.example.yml`
+  为 `mcp.yml`,配置 `@deepseek-ai/dsh-mcp-client`。模型看到
+  `mcp__<serverName>__<toolName>`。
+- **命名 subagent 工具**: 用 `agents.yml` 定义 `toolName` / `persona`,
+  适合把任务委派给另一个 agent,而不是普通函数。
+
+仓库自带一个 `text_stats` demo:
+
+```bash
+.venv/bin/python -m demos.custom_tool_demo
+```
+
+输出会包含:
+
+```text
+[tool_call] text_stats {"text": "DeepSeek Harness 的 function calling demo 很好用!"}
+[tool_result] isError=False 字符数:45;单词数:7
+```
+
+完整写法、schema 约定、MCP 配置和排错见 [自定义工具](docs/custom-tools.md)。
+
+## 人工审批(HITL)
+
+平台默认启用人工审批桥:需要审批的工具调用会暂停,并在输入框上方显示审批条。
+
+- 浏览器里让模型调用 `guarded_echo`,或对现有工具强制审批:
+
+  ```bash
+  export DSH_APPROVAL_TOOLS="bash,write,edit"
+  .venv/bin/uvicorn agent_platform.main:app --host 127.0.0.1 --port 8765
+  ```
+
+- 批准只对本次调用生效;拒绝、超时、审批通道不可用都按失败关闭处理。
+- 审批事件会进入轨迹,API 是 `GET /api/approvals` 和
+  `POST /api/approvals/{id}`。
+- 默认等待 120 秒,可用 `DSH_APPROVAL_TIMEOUT` 调整;设置
+  `DSH_APPROVAL_BRIDGE=0` 可关闭审批桥。
+
+CLI 端到端 demo:
+
+```bash
+.venv/bin/python -m demos.custom_tool_demo --approval
+```
+
+完整架构、事件契约和限制见 [人工审批](docs/human-in-the-loop.md)。
+
 ## 流式输出
 
 平台现在有**两层流式**:
@@ -204,6 +271,7 @@ POST /api/stop
 语义是**硬停止**:
 
 - 终止共享的 dsh runtime 子进程,当前所有会话、团队角色和子代理立即中断;
+- 等待中的人工审批会被取消并按拒绝处理;
 - 正在流式输出的 SSE 会收到 `finish_reason=stopped`,前端显示"已停止全部任务";
 - runtime 在**下一条消息**到来时自动重启;
 - 被中断的 chat 会走已有的 runtime 会话失效恢复逻辑(新建 runtime session 并注入最近对话)。
@@ -216,6 +284,8 @@ POST /api/stop
 
 ```bash
 .venv/bin/python smoke.py   # 直接跑一轮 agent turn,dump 全部事件词汇表(诊断用)
+.venv/bin/python -m demos.custom_tool_demo  # 验证本地工具 text_stats 的 function calling
+.venv/bin/python -m demos.custom_tool_demo --approval  # 验证人工审批 guarded_echo
 ```
 
 ## 已知边界(可按需扩展)

@@ -33,6 +33,18 @@ export const api = {
       method: "POST",
     }),
 
+  approvals: () =>
+    fetchJson<{ id: string; chatId?: string; toolName: string; callId?: string; reason?: string }[]>(
+      "/api/approvals"
+    ),
+
+  resolveApproval: (id: string, decision: "approve" | "reject") =>
+    fetchJson<{ ok: boolean; id: string; outcome: string }>(`/api/approvals/${id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision }),
+    }),
+
   chats: () => fetchJson<ChatSummary[]>("/api/chats"),
 
   createChat: () =>

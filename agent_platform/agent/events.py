@@ -216,6 +216,11 @@ def make_notification_handler(
     """构造单个 turn 的通知回调:翻译、修标题、按需打 agent 标签后入队。"""
 
     def on_notification(notification: Notification) -> None:
+        if root_sid:
+            chat.session_ids.add(str(root_sid))
+        session_id = str(notification.payload.get("sessionId") or "")
+        if session_id:
+            chat.session_ids.add(session_id)
         item = translate_notification(notification, root_sid=root_sid)
         if item is None:
             return

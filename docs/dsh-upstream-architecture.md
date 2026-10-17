@@ -183,6 +183,10 @@ assistant 消息带 tool-call 块
 
 推论:**审批、超时、脱敏展示都是事件监听器,不需要改 loop**。任何失败都被规范化为结果而不是中断,同时保证 model-facing 的工具结果唯一且冻结。
 
+本仓库的 `approval-bridge` 插件就是这个接缝上的一个 answerer:它监听 `approval/request`,
+通过本地 HTTP 回调把问题送到 Web 审批条,拿到人工决定后返回 `allowed-once` / `rejected`。
+详见 [人工审批(HITL)](human-in-the-loop.md)。
+
 ## 9. Capability Seam(能力接缝)模式
 
 一个 **seam = 可替换的能力**,由三个角色构成完整组合:

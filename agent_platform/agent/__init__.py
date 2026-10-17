@@ -6,6 +6,7 @@ from .models import Chat
 from .service import (
     AgentService,
     AgentUnavailable,
+    ApprovalNotFound,
     ChatBusy,
     ChatNotFound,
     TurnStream,
@@ -14,6 +15,7 @@ from .service import (
 __all__ = [
     "AgentService",
     "AgentUnavailable",
+    "ApprovalNotFound",
     "Chat",
     "ChatBusy",
     "ChatNotFound",
