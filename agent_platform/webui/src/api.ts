@@ -34,9 +34,17 @@ export const api = {
     }),
 
   approvals: () =>
-    fetchJson<{ id: string; chatId?: string; toolName: string; callId?: string; reason?: string }[]>(
-      "/api/approvals"
-    ),
+    fetchJson<
+      {
+        id: string;
+        chatId?: string;
+        toolName: string;
+        callId?: string;
+        reason?: string;
+        timeoutSeconds?: number;
+        createdAt?: number;
+      }[]
+    >("/api/approvals"),
 
   resolveApproval: (id: string, decision: "approve" | "reject") =>
     fetchJson<{ ok: boolean; id: string; outcome: string }>(`/api/approvals/${id}`, {
@@ -55,6 +63,13 @@ export const api = {
     }),
 
   chat: (id: string) => fetchJson<ChatDetail>(`/api/chats/${id}`),
+
+  renameChat: (id: string, title: string) =>
+    fetchJson<ChatSummary>(`/api/chats/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title }),
+    }),
 
   removeChat: (id: string) =>
     fetchJson<{ ok: boolean }>(`/api/chats/${id}`, { method: "DELETE" }),

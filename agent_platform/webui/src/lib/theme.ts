@@ -1,50 +1,71 @@
 import { useEffect, useState } from "react";
 
 /*
- * 主题切换与官方同机制:切换 body[data-ds-dark-theme] 属性,
- * 亮暗两套变量都来自 vendor 的 design-platform.css。
+ * 与官方同机制:只切换 body[data-ds-dark-theme],亮暗变量全部来自
+ * vendor/design-platform.css。模式支持 system / light / dark。
  */
 
 const STORE_KEY = "agentbox-theme";
-type Theme = "dark" | "light";
+export type ThemeMode = "system" | "light" | "dark";
+export type ResolvedTheme = "light" | "dark";
 
-function readStoredTheme(): string | null {
+function readStoredMode(): ThemeMode {
   try {
-    return localStorage.getItem(STORE_KEY);
+    const stored = localStorage.getItem(STORE_KEY);
+    if (stored === "light" || stored === "dark" || stored === "system") return stored;
   } catch {
-    // Safari 隐私模式 / 禁用站点存储时 localStorage 访问会抛异常。
-    return null;
+    /* 隐私模式或禁用存储时按系统主题走 */
   }
+  return "system";
 }
 
-function storeTheme(theme: Theme): void {
-  try {
-    localStorage.setItem(STORE_KEY, theme);
-  } catch {
-    // 存不了主题不影响页面使用。
-  }
+function systemTheme(): ResolvedTheme {
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-function currentTheme(): Theme {
-  const stored = readStoredTheme();
-  if (stored === "dark" || stored === "light") return stored;
-  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+function applyTheme(theme: ResolvedTheme): void {
+  const dark = theme === "dark";
+  document.body.toggleAttribute("data-ds-dark-theme", dark);
+  document.documentElement.toggleAttribute("data-ds-light-theme", !dark);
+  document.documentElement.style.colorScheme = theme;
 }
 
-function applyTheme(theme: Theme): void {
-  document.body.toggleAttribute("data-ds-dark-theme", theme === "dark");
-  document.documentElement.toggleAttribute("data-ds-light-theme", theme === "light");
+export interface ThemeController {
+  mode: ThemeMode;
+  theme: ResolvedTheme;
+  setMode: (mode: ThemeMode) => void;
+  toggle: () => void;
 }
 
-export function useTheme(): { theme: Theme; toggle: () => void } {
-  const [theme, setTheme] = useState<Theme>(currentTheme);
+export function useTheme(): ThemeController {
+  const [mode, setModeState] = useState<ThemeMode>(readStoredMode);
+  const [system, setSystem] = useState<ResolvedTheme>(systemTheme);
+  const theme: ResolvedTheme = mode === "system" ? system : mode;
+
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
-  const toggle = () => {
-    const next: Theme = theme === "dark" ? "light" : "dark";
-    storeTheme(next);
-    setTheme(next);
+
+  useEffect(() => {
+    if (mode !== "system") return;
+    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!media) return;
+    const onChange = () => setSystem(media.matches ? "dark" : "light");
+    setSystem(media.matches ? "dark" : "light");
+    media.addEventListener?.("change", onChange);
+    return () => media.removeEventListener?.("change", onChange);
+  }, [mode]);
+
+  const setMode = (next: ThemeMode) => {
+    try {
+      localStorage.setItem(STORE_KEY, next);
+    } catch {
+      /* 存不了也不影响本次切换 */
+    }
+    setModeState(next);
   };
-  return { theme, toggle };
+
+  const toggle = () => setMode(theme === "dark" ? "light" : "dark");
+
+  return { mode, theme, setMode, toggle };
 }

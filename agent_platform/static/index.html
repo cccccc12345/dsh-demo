@@ -6,12 +6,29 @@
     <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <title>AgentBox · DeepSeek Harness</title>
-    <script type="module" crossorigin src="/static/assets/index-AGqHLK-u.js"></script>
+    <script type="module" crossorigin src="/static/assets/index-J0B1DjGx.js"></script>
     <link rel="modulepreload" crossorigin href="/static/assets/vendor-C8w-UNLI.js">
     <link rel="modulepreload" crossorigin href="/static/assets/markdown-BPKGNPPY.js">
-    <link rel="stylesheet" crossorigin href="/static/assets/index-BnVELfsS.css">
+    <link rel="stylesheet" crossorigin href="/static/assets/index-By8-xYmT.css">
   </head>
-  <body data-ds-dark-theme>
+  <body>
+    <script>
+      // 首屏前按本地偏好/系统主题设置属性,避免暗色用户看到白闪。
+      (function () {
+        try {
+          var stored = localStorage.getItem("agentbox-theme");
+          var dark =
+            stored === "dark" ||
+            ((!stored || stored === "system") &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.body.setAttribute("data-ds-dark-theme", "");
+          else document.documentElement.setAttribute("data-ds-light-theme", "");
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        } catch (e) {
+          document.body.setAttribute("data-ds-dark-theme", "");
+        }
+      })();
+    </script>
     <div id="root">
       <div style="padding:24px;font-family:system-ui,sans-serif;color:#888">正在加载 AgentBox…</div>
     </div>

@@ -1,54 +1,107 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, streamTurn } from "./api";
 import { ApprovalBar } from "./components/ApprovalBar";
-import { Composer, type ComposerProps } from "./components/Composer";
-import { Flow } from "./components/Flow";
-import { Rail } from "./components/Rail";
-import { TeamDock } from "./components/TeamDock";
-import { TopBar } from "./components/TopBar";
-import { TrajectoryDock } from "./components/TrajectoryDock";
+import { BrandLockup } from "./components/Brand";
+import { CommandPalette } from "./components/CommandPalette";
+import { Composer } from "./components/Composer";
+import { ConfirmDialog } from "./components/ConfirmDialog";
+import { Conversation } from "./components/Conversation";
+import { MainHeader } from "./components/MainHeader";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { Sidebar } from "./components/Sidebar";
+import { TeamView } from "./components/TeamView";
+import { Toast, type ToastState } from "./components/Toast";
+import { TrajectoryView } from "./components/TrajectoryView";
+import { Welcome } from "./components/Welcome";
+import { IconAlert, IconRefresh, IconSparkles, IconX } from "./components/Icons";
 import { useTheme } from "./lib/theme";
-import type { AgentSpecInfo, Block, ChatSummary, ChildGroup, ConfigInfo, PendingApproval, TeamPanel, TrajectoryEvent, TranscriptEntry, TurnEvent } from "./types";
-
-function agentView(agents: AgentSpecInfo[], id?: string) {
-  const found = id ? agents.find((agent) => agent.id === id) : undefined;
-  return {
-    emoji: found?.emoji ?? "🤖",
-    name: found?.name ?? id ?? "Agent",
-  };
-}
-
-function markAllStagesDone(panel: TeamPanel | null): TeamPanel | null {
-  if (!panel) return panel;
-  const stages = Object.fromEntries(
-    Object.entries(panel.stages).map(([id, stage]) => [id, { ...stage, stage: "done" }]),
-  );
-  return { ...panel, stages };
-}
-
-interface TurnState {
-  blocks: Block[];
-  children: ChildGroup[];
-}
-
-const EMPTY_TURN: TurnState = { blocks: [], children: [] };
+import {
+  cx,
+  downloadText,
+  formatDateTime,
+  formatDurationShort,
+  safeFilename,
+} from "./lib/ui";
+import type {
+  AgentSpecInfo,
+  Block,
+  ChatSummary,
+  ChildGroup,
+  ChildLine,
+  ConfigInfo,
+  FeedbackValue,
+  PendingApproval,
+  TeamPanel,
+  TrajectoryEvent,
+  TranscriptEntry,
+  TurnEvent,
+  TurnMeta,
+  ViewTab,
+} from "./types";
 
 const TRAJECTORY_KEY = "agentbox-trajectory:";
 const TRAJECTORY_LIMIT = 500;
+const LAST_CHAT_KEY = "agentbox-last-chat";
+const PINNED_KEY = "agentbox-pinned";
+const SIDEBAR_KEY = "agentbox-sidebar-collapsed";
+
 const TRAJECTORY_SKIP = new Set([
   "assistant_delta",
   "assistant_stream_start",
   "assistant_stream_end",
   "chat_title",
-  "done",
 ]);
+
+interface TurnState {
+  blocks: Block[];
+  children: ChildGroup[];
+  meta: TurnMeta | null;
+}
+
+const EMPTY_TURN: TurnState = { blocks: [], children: [], meta: null };
+
+interface ConfirmState {
+  kind: "delete" | "stop";
+  chatId?: string;
+  title: string;
+  message: string;
+  confirmLabel: string;
+  danger: boolean;
+}
+
+function readStored(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* 存储被禁用不影响主流程 */
+  }
+}
+
+function readPinned(): string[] {
+  const raw = readStored(PINNED_KEY);
+  if (!raw) return [];
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 function loadTrajectory(chatId: string): TrajectoryEvent[] {
   try {
     const raw = sessionStorage.getItem(TRAJECTORY_KEY + chatId);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as TrajectoryEvent[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as TrajectoryEvent[]) : [];
   } catch {
     return [];
   }
@@ -58,8 +111,16 @@ function saveTrajectory(chatId: string, events: TrajectoryEvent[]): void {
   try {
     sessionStorage.setItem(TRAJECTORY_KEY + chatId, JSON.stringify(events));
   } catch {
-    // 存储满了也不影响主流程。
+    /* 存储满了不影响主流程 */
   }
+}
+
+function agentView(agents: AgentSpecInfo[], id?: string) {
+  const found = id ? agents.find((agent) => agent.id === id) : undefined;
+  return {
+    emoji: found?.emoji ?? "🤖",
+    name: found?.name ?? id ?? "Agent",
+  };
 }
 
 function phaseStageLabel(stage: string | undefined, round: number | undefined): string {
@@ -70,6 +131,14 @@ function phaseStageLabel(stage: string | undefined, round: number | undefined): 
   return "处理中";
 }
 
+function markAllStagesDone(panel: TeamPanel | null): TeamPanel | null {
+  if (!panel) return panel;
+  const stages = Object.fromEntries(
+    Object.entries(panel.stages).map(([id, stage]) => [id, { ...stage, stage: "done" }]),
+  );
+  return { ...panel, stages };
+}
+
 function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
   for (let i = items.length - 1; i >= 0; i--) {
     if (predicate(items[i])) return i;
@@ -78,245 +147,314 @@ function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
 }
 
 interface ReduceCtx {
-  setStatus: (s: string) => void;
-  onTeamPanel: (fn: (p: TeamPanel | null) => TeamPanel | null) => void;
-  openDock: () => void;
+  setStatus: (status: string) => void;
+  onTeamPanel: (updater: (panel: TeamPanel | null) => TeamPanel | null) => void;
   agents: AgentSpecInfo[];
 }
 
-function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
-  const isChild = ev.scope === "child";
-  const blocks = [...prev.blocks];
-  let children = prev.children;
+function appendChildLine(children: ChildGroup[], line: ChildLine): ChildGroup[] {
+  const next = [...children];
+  const openIndex = findLastIndex(next, (child) => child.status === undefined);
+  const target = openIndex >= 0 ? openIndex : next.length - 1;
+  if (target < 0) return [{ childId: "child-0", lines: [line], open: true }];
+  next[target] = { ...next[target], lines: [...next[target].lines, line] };
+  return next;
+}
 
-  switch (ev.type) {
+function attachChildResult(
+  children: ChildGroup[],
+  result: { text: string; isError: boolean },
+  callId?: string,
+): ChildGroup[] {
+  const next = [...children];
+  for (let i = next.length - 1; i >= 0; i--) {
+    const child = next[i];
+    const lineIndex = findLastIndex(
+      child.lines,
+      (line) => line.kind === "tool" && Boolean(callId) && line.callId === callId,
+    );
+    if (lineIndex >= 0) {
+      const lines = [...child.lines];
+      lines[lineIndex] = { ...lines[lineIndex], result };
+      next[i] = { ...child, lines };
+      return next;
+    }
+  }
+  return appendChildLine(next, {
+    kind: "tool",
+    text: (result.text || "").slice(0, 200),
+    callId,
+    result,
+  });
+}
+
+function reduceTurn(prev: TurnState, event: TurnEvent, ctx: ReduceCtx): TurnState {
+  const isChild = event.scope === "child";
+  let blocks = prev.blocks;
+  let children = prev.children;
+  let meta = prev.meta;
+
+  const patchMeta = (patch: Partial<TurnMeta>) => {
+    meta = { ...(meta ?? {}), ...patch };
+  };
+
+  switch (event.type) {
     case "user_echo":
-      blocks.push({ kind: "user", text: ev.text });
+      blocks = [...blocks, { kind: "user", text: event.text }];
       break;
 
     case "turn_start":
-      if (!isChild) ctx.setStatus(`Turn ${ev.turn} 进行中…`);
+      if (!isChild) {
+        ctx.setStatus(`Turn ${event.turn ?? ""} 进行中…`);
+        patchMeta({ startedAt: meta?.startedAt ?? Date.now() });
+      }
       break;
 
     case "step_start":
-      if (!isChild) ctx.setStatus(`Turn ${ev.turn} · Step ${ev.step} …`);
+      if (!isChild) ctx.setStatus(`Turn ${event.turn ?? ""} · Step ${event.step ?? ""} …`);
+      break;
+
+    case "usage":
+      if (event.usage) patchMeta({ usage: event.usage });
       break;
 
     case "tool_call": {
       const block: Block = {
         kind: "tool",
-        name: ev.name || "tool",
-        detail: ev.detail || "",
-        callId: ev.callId || "",
-        agent: ev.agent,
-        scope: ev.scope,
+        name: event.name || "tool",
+        detail: event.detail || "",
+        callId: event.callId || "",
+        agent: event.agent,
+        scope: event.scope,
       };
       if (isChild) {
-        for (const child of children) {
-          if (child.status === undefined) {
-            child.lines.push({ kind: "tool", text: `${ev.name || "tool"} ${ev.detail || ""}`.slice(0, 120), callId: ev.callId });
-            break;
-          }
-        }
+        children = appendChildLine(children, {
+          kind: "tool",
+          text: `${event.name || "tool"} ${event.detail || ""}`.slice(0, 160),
+          callId: event.callId,
+        });
       } else {
-        blocks.push(block);
+        blocks = [...blocks, block];
       }
       break;
     }
 
     case "tool_result": {
-      const result = { text: ev.text || "", isError: Boolean(ev.isError) };
-      attach: {
-        if (isChild) {
-          for (let i = children.length - 1; i >= 0; i--) {
-            const child = children[i];
-            const line = [...child.lines].reverse().find((l) => l.kind === "tool" && l.callId === ev.callId);
-            if (line) {
-              line.result = result;
-              break attach;
-            }
-            if (child.status !== undefined && child !== children[children.length - 1]) continue;
-          }
-          children[children.length - 1]?.lines.push({
-            kind: "tool",
-            text: (ev.text || "").slice(0, 160),
-            result,
-          });
-          break attach;
+      const result = { text: event.text || "", isError: Boolean(event.isError) };
+      if (isChild) {
+        children = attachChildResult(children, result, event.callId);
+        break;
+      }
+      let matched = false;
+      blocks = blocks.map((block) => {
+        if (block.kind === "tool" && event.callId && block.callId === event.callId) {
+          matched = true;
+          return { ...block, result };
         }
-        for (let i = blocks.length - 1; i >= 0; i--) {
-          const b = blocks[i];
-          if (b.kind === "tool" && b.callId && b.callId === ev.callId) {
-            blocks[i] = { ...b, result };
-            break attach;
-          }
-        }
-        blocks.push({ kind: "tool", name: "tool", detail: "", callId: ev.callId || "", result });
+        return block;
+      });
+      if (!matched) {
+        blocks = [
+          ...blocks,
+          { kind: "tool", name: "tool", detail: "", callId: event.callId || "", result },
+        ];
       }
       break;
     }
 
     case "assistant_stream_start": {
       if (isChild) break;
-      if (
-        !blocks.some(
-          (b) => b.kind === "message" && b.streamId !== undefined && b.streamId === ev.streamId,
-        )
-      ) {
-        blocks.push({
-          kind: "message",
-          text: "",
-          streamId: ev.streamId,
-          agent: ev.agent,
-          scope: ev.scope,
-        });
+      if (!blocks.some((block) => block.kind === "message" && block.streamId === event.streamId)) {
+        blocks = [
+          ...blocks,
+          {
+            kind: "message",
+            text: "",
+            streamId: event.streamId,
+            agent: event.agent,
+            scope: event.scope,
+          },
+        ];
       }
       break;
     }
 
     case "assistant_delta": {
       if (isChild) break;
-      const idx = findLastIndex(
+      const index = findLastIndex(
         blocks,
-        (b) => b.kind === "message" && b.streamId !== undefined && b.streamId === ev.streamId,
+        (block) => block.kind === "message" && block.streamId === event.streamId,
       );
-      if (idx >= 0) {
-        const cur = blocks[idx];
-        if (cur.kind === "message") {
-          blocks[idx] = { ...cur, text: (cur.text ?? "") + (ev.text ?? "") };
+      if (index >= 0) {
+        const current = blocks[index];
+        if (current.kind === "message") {
+          blocks = blocks.map((block, i) =>
+            i === index ? { ...current, text: `${current.text ?? ""}${event.text ?? ""}` } : block,
+          );
         }
       } else {
-        blocks.push({
-          kind: "message",
-          text: ev.text ?? "",
-          streamId: ev.streamId,
-          agent: ev.agent,
-          scope: ev.scope,
-        });
+        blocks = [
+          ...blocks,
+          {
+            kind: "message",
+            text: event.text ?? "",
+            streamId: event.streamId,
+            agent: event.agent,
+            scope: event.scope,
+          },
+        ];
       }
       break;
     }
 
     case "assistant_stream_end": {
       if (isChild) break;
-      const idx = findLastIndex(
+      const index = findLastIndex(
         blocks,
-        (b) => b.kind === "message" && b.streamId !== undefined && b.streamId === ev.streamId,
+        (block) => block.kind === "message" && block.streamId === event.streamId,
       );
-      if (idx >= 0) {
-        const cur = blocks[idx];
-        if (cur.kind === "message" && !cur.text) blocks.splice(idx, 1);
+      if (index >= 0) {
+        const current = blocks[index];
+        if (current.kind === "message" && !current.text) {
+          blocks = blocks.filter((_, i) => i !== index);
+        } else {
+          blocks = blocks.map((block, i) =>
+            i === index && block.kind === "message" ? { ...block, streamId: undefined } : block,
+          );
+        }
       }
       break;
     }
 
     case "message": {
       if (isChild) {
-        children = [...children];
-        let group = [...children].find((c) => c.status === undefined);
-        if (!group) {
-          group = { childId: `child-${children.length}`, lines: [], open: true };
-          children.push(group);
-        }
-        group = { ...group, lines: [...group.lines] };
-        children[children.length - 1] = group;
-        const text = String(ev.text || "");
+        const text = String(event.text || "");
         if (text) {
-          group.lines.push({ kind: "message", text: text.length > 160 ? text.slice(0, 160) + "…" : text });
+          children = appendChildLine(children, {
+            kind: "message",
+            text: text.length > 200 ? `${text.slice(0, 200)}…` : text,
+          });
         }
-        if (ev.reasoning) {
-          const r = String(ev.reasoning).replace(/\s+/g, " ").trim();
-          if (r) {
-            const last = group.lines[group.lines.length - 1];
-            if (last?.kind === "reasoning") last.text = (last.text + "\n" + r).slice(0, 300);
-            else group.lines.push({ kind: "reasoning", text: r.slice(0, 220) });
+        if (event.reasoning) {
+          const reasoning = String(event.reasoning).replace(/\s+/g, " ").trim();
+          if (reasoning) {
+            children = appendChildLine(children, {
+              kind: "reasoning",
+              text: reasoning.slice(0, 220),
+            });
           }
         }
         break;
       }
-      const streamIdx = findLastIndex(
-        blocks,
-        (b) =>
-          b.kind === "message" &&
-          b.streamId !== undefined &&
-          b.agent === ev.agent &&
-          b.scope === ev.scope,
-      );
-      if (streamIdx >= 0) {
-        const cur = blocks[streamIdx];
-        const text = ev.text ?? (cur.kind === "message" ? cur.text : "");
-        blocks[streamIdx] = {
-          kind: "message",
-          text,
-          agent: ev.agent,
-          scope: ev.scope,
-        };
-        if (ev.agent) {
-          ctx.onTeamPanel((p) => {
-            const base = p ?? { stages: {}, timeline: [] };
-            const previous = base.stages[ev.agent!] ?? {};
-            return {
-              ...base,
-              stages: { ...base.stages, [ev.agent!]: { ...previous, text } },
-            };
-          });
+
+      if (event.reasoning) {
+        const reasoning = String(event.reasoning).replace(/\s+/g, " ").trim();
+        if (reasoning) {
+          const last = blocks[blocks.length - 1];
+          if (last?.kind === "reasoning") {
+            blocks = [
+              ...blocks.slice(0, -1),
+              { ...last, text: `${last.text}\n${reasoning}`.slice(0, 2000) },
+            ];
+          } else {
+            blocks = [
+              ...blocks,
+              {
+                kind: "reasoning",
+                text: reasoning.slice(0, 1200),
+                agent: event.agent,
+                scope: event.scope,
+              },
+            ];
+          }
         }
-      } else if (ev.agent) {
-        const idx = blocks.findIndex((b) => b.kind === "message" && b.agent === ev.agent);
-        if (idx >= 0) {
-          const cur = blocks[idx];
-          if (cur.kind === "message") blocks[idx] = { ...cur, text: ev.text ?? "" };
-        } else blocks.push({ kind: "message", text: ev.text ?? "", agent: ev.agent });
-        ctx.onTeamPanel((p) => {
-          const base = p ?? { stages: {}, timeline: [] };
-          const previous = base.stages[ev.agent!] ?? {};
+      }
+
+      const messageText = event.text;
+      if (!messageText) break;
+
+      const streamIndex = findLastIndex(
+        blocks,
+        (block) =>
+          block.kind === "message" &&
+          block.streamId !== undefined &&
+          block.agent === event.agent &&
+          block.scope === event.scope,
+      );
+      if (streamIndex >= 0) {
+        blocks = blocks.map((block, i) =>
+          i === streamIndex ? { kind: "message", text: messageText, agent: event.agent, scope: event.scope } : block,
+        );
+      } else if (event.agent) {
+        const index = blocks.findIndex(
+          (block) => block.kind === "message" && block.agent === event.agent,
+        );
+        if (index >= 0) {
+          blocks = blocks.map((block, i) => (i === index ? { ...block, text: messageText } : block));
+        } else {
+          blocks = [...blocks, { kind: "message", text: messageText, agent: event.agent }];
+        }
+      } else {
+        const index = blocks.findIndex(
+          (block) => block.kind === "message" && !block.agent,
+        );
+        if (index >= 0) {
+          blocks = blocks.map((block, i) => (i === index ? { ...block, text: messageText } : block));
+        } else {
+          blocks = [...blocks, { kind: "message", text: messageText }];
+        }
+      }
+
+      if (event.agent) {
+        const agentId = event.agent;
+        ctx.onTeamPanel((panel) => {
+          const base = panel ?? { stages: {}, timeline: [] };
+          const previous = base.stages[agentId] ?? {};
           return {
             ...base,
-            stages: { ...base.stages, [ev.agent!]: { ...previous, text: ev.text ?? "" } },
+            stages: { ...base.stages, [agentId]: { ...previous, text: messageText } },
           };
         });
-      } else {
-        const idx = blocks.findIndex((b) => b.kind === "message" && !b.agent);
-        if (idx >= 0) {
-          const cur = blocks[idx];
-          if (cur.kind === "message") blocks[idx] = { ...cur, text: ev.text ?? "" };
-        } else blocks.push({ kind: "message", text: ev.text ?? "" });
-      }
-      if (ev.reasoning) {
-        const r = String(ev.reasoning).replace(/\s+/g, " ").trim();
-        if (r) {
-          const last = blocks[blocks.length - 1];
-          if (last?.kind === "reasoning") last.text = (last.text + "\n" + r).slice(0, 400);
-          else blocks.push({ kind: "reasoning", text: r.slice(0, 300) });
-        }
       }
       break;
     }
 
     case "reasoning": {
-      const text = String(ev.text || "").replace(/\s+/g, " ").trim();
+      const text = String(event.text || "").replace(/\s+/g, " ").trim();
       if (!text) break;
+      if (isChild) {
+        children = appendChildLine(children, { kind: "reasoning", text: text.slice(0, 220) });
+        break;
+      }
       const last = blocks[blocks.length - 1];
-      if (last?.kind === "reasoning") last.text = (last.text + "\n" + text).slice(0, 600);
-      else blocks.push({ kind: "reasoning", text: text.slice(0, 320), scope: ev.scope, agent: ev.agent });
+      if (last?.kind === "reasoning") {
+        blocks = [
+          ...blocks.slice(0, -1),
+          { ...last, text: `${last.text}\n${text}`.slice(0, 2000) },
+        ];
+      } else {
+        blocks = [...blocks, { kind: "reasoning", text: text.slice(0, 1200), scope: event.scope, agent: event.agent }];
+      }
       break;
     }
 
     case "phase": {
-      blocks.push({ kind: "phase", agent: ev.agent, stage: ev.stage, round: ev.round });
-      const view = agentView(ctx.agents, ev.agent);
-      ctx.setStatus(`${view.emoji} ${view.name} · ${phaseStageLabel(ev.stage, ev.round)}…`);
-      ctx.openDock();
-      if (ev.agent) {
-        const agentId = ev.agent;
-        ctx.onTeamPanel((p) => {
-          const base = p ?? { stages: {}, timeline: [] };
+      blocks = [
+        ...blocks,
+        { kind: "phase", agent: event.agent, stage: event.stage, round: event.round },
+      ];
+      const view = agentView(ctx.agents, event.agent);
+      ctx.setStatus(`${view.emoji} ${view.name} · ${phaseStageLabel(event.stage, event.round)}…`);
+      if (event.agent) {
+        const agentId = event.agent;
+        ctx.onTeamPanel((panel) => {
+          const base = panel ?? { stages: {}, timeline: [] };
           const previous = base.stages[agentId] ?? {};
           return {
             ...base,
             stages: {
               ...base.stages,
-              [agentId]: { ...previous, stage: ev.stage, round: ev.round },
+              [agentId]: { ...previous, stage: event.stage, round: event.round },
             },
           };
         });
@@ -325,403 +463,987 @@ function reduceTurn(prev: TurnState, ev: TurnEvent, ctx: ReduceCtx): TurnState {
     }
 
     case "verdict": {
-      blocks.push({ kind: "verdict", verdict: ev.verdict, round: ev.round });
-      ctx.setStatus(ev.verdict === "APPROVE" ? "✅ Reviewer 通过" : `🔁 Reviewer 打回(第 ${ev.round} 轮)`);
-      ctx.onTeamPanel((p) => {
-        const base = p ?? { stages: {}, timeline: [] };
+      blocks = [
+        ...blocks,
+        { kind: "verdict", verdict: event.verdict, round: event.round },
+      ];
+      ctx.setStatus(
+        event.verdict === "APPROVE" ? "Reviewer 通过" : `Reviewer 打回(第 ${event.round ?? 0} 轮)`,
+      );
+      ctx.onTeamPanel((panel) => {
+        const base = panel ?? { stages: {}, timeline: [] };
         const stages = { ...base.stages };
         if (stages.reviewer) stages.reviewer = { ...stages.reviewer, stage: "done" };
-        if (ev.verdict !== "NEEDS_CHANGES" && stages.coder) {
+        if (event.verdict !== "NEEDS_CHANGES" && stages.coder) {
           stages.coder = { ...stages.coder, stage: "done" };
         }
         return {
           ...base,
           stages,
-          timeline: [...base.timeline, { verdict: ev.verdict || "", round: ev.round ?? 0 }],
+          timeline: [...base.timeline, { verdict: event.verdict || "", round: event.round ?? 0 }],
         };
       });
       break;
     }
 
-    case "agent_spawn":
-      children = [...children, { childId: ev.child || `child-${children.length}`, lines: [], open: true }];
-      ctx.setStatus("🤖 子代理已启动");
-      break;
-
-    case "agent_done":
-      children = children.map((c) =>
-        c.childId === ev.child
-          ? {
-              ...c,
-              status: `${ev.status || ev.stop || "完成"}`,
-              lines: ev.summary ? [...c.lines, { kind: "message", text: ev.summary }] : c.lines,
-            }
-          : c,
-      );
-      ctx.setStatus("🏁 子代理结束");
-      break;
-
-    case "chat_title":
-      break; // 标题更新在回调里做
-
-    case "error":
-      blocks.push({ kind: "error", text: ev.message || "模型请求失败" });
-      ctx.setStatus("");
-      break;
-
-    case "end": {
-      if (ev.finish_reason === "stopped") {
-        // runtime 被硬中断时不会有 assistant_stream_end/最终 message;
-        // 清掉空的流式占位块,给用户一个明确的停止提示。
-        for (let i = blocks.length - 1; i >= 0; i--) {
-          const block = blocks[i];
-          if (block.kind === "message" && !block.text) blocks.splice(i, 1);
-        }
-        blocks.push({ kind: "note", text: "⏹️ 已停止全部任务" });
-        ctx.onTeamPanel(markAllStagesDone);
-        break;
-      }
-      const hasMain = blocks.some((b) => b.kind === "message" && !b.agent);
-      if (ev.response) {
-        if (!hasMain) blocks.push({ kind: "message", text: ev.response });
+    case "agent_spawn": {
+      const childId = event.child || `child-${children.length}`;
+      const existing = children.findIndex((child) => child.childId === childId);
+      if (existing >= 0) {
+        children = children.map((child, index) =>
+          index === existing ? { ...child, status: undefined, open: true } : child,
+        );
       } else {
-        const emptyIdx = blocks.findIndex((b) => b.kind === "message" && !b.agent && !b.text);
-        if (emptyIdx >= 0) blocks[emptyIdx] = { kind: "note", text: "(本轮没有文本回复,详见会话记录)" };
-        else if (!hasMain) blocks.push({ kind: "note", text: "(本轮没有文本回复,详见会话记录)" });
+        children = [...children, { childId, lines: [], open: true }];
       }
-      ctx.onTeamPanel(markAllStagesDone);
+      ctx.setStatus("子代理已启动");
       break;
     }
+
+    case "agent_done": {
+      children = children.map((child) =>
+        child.childId === event.child
+          ? {
+              ...child,
+              status: event.status || event.stop || "完成",
+              lines: event.summary
+                ? [...child.lines, { kind: "message", text: event.summary }]
+                : child.lines,
+            }
+          : child,
+      );
+      ctx.setStatus("子代理结束");
+      break;
+    }
+
+    case "error": {
+      blocks = [...blocks, { kind: "error", text: event.message || "模型请求失败" }];
+      patchMeta({ failed: true, endedAt: Date.now() });
+      ctx.setStatus("");
+      break;
+    }
+
+    case "end": {
+      patchMeta({ endedAt: Date.now(), finishReason: event.finish_reason });
+      if (event.finish_reason === "stopped") {
+        blocks = blocks.filter((block) => !(block.kind === "message" && !block.text));
+        blocks = [...blocks, { kind: "note", text: "已停止全部任务" }];
+      } else {
+        const hasMessage = blocks.some((block) => block.kind === "message" && block.text);
+        if (event.response && !hasMessage) {
+          blocks = [...blocks, { kind: "message", text: event.response }];
+        } else if (!hasMessage) {
+          blocks = [...blocks, { kind: "note", text: "本轮没有文本回复,详见会话记录" }];
+        }
+      }
+      ctx.onTeamPanel(markAllStagesDone);
+      ctx.setStatus("");
+      break;
+    }
+
+    default:
+      break;
   }
 
-  return { blocks, children };
+  return { blocks, children, meta };
 }
 
 export default function App() {
-  const { theme, toggle } = useTheme();
+  const { mode: themeMode, theme, setMode: setThemeMode, toggle: toggleTheme } = useTheme();
   const [config, setConfig] = useState<ConfigInfo | null>(null);
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
   const [turn, setTurn] = useState<TurnState>(EMPTY_TURN);
   const [trajectory, setTrajectory] = useState<TrajectoryEvent[]>([]);
-  const trajectoryRef = useRef<Record<string, TrajectoryEvent[]>>({});
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("");
-  const [team, setTeam] = useState<ComposerProps["team"]>(null);
-  const [dockOpen, setDockOpen] = useState(false);
-  const [dockTab, setDockTab] = useState<"team" | "trajectory">("team");
-  const [notice, setNotice] = useState<{ kind: "err" | "info"; text: string } | null>(null);
+  const [team, setTeam] = useState<TeamPanel | null>(null);
+  const [teamMode, setTeamMode] = useState(false);
+  const [view, setView] = useState<ViewTab>("chat");
+  const [notice, setNotice] = useState<ToastState | null>(null);
   const [connError, setConnError] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStored(SIDEBAR_KEY) === "1");
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [pinned, setPinned] = useState<string[]>(readPinned);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [feedback, setFeedback] = useState<Record<string, FeedbackValue>>({});
+  const [focusSignal, setFocusSignal] = useState(0);
+  const [loadingChat, setLoadingChat] = useState(false);
+  const [mockDismissed, setMockDismissed] = useState(false);
+  const [now, setNow] = useState(Date.now());
 
   const runningRef = useRef(false);
   const activeRef = useRef<string | null>(null);
+  const chatsRef = useRef<ChatSummary[]>([]);
+  const trajectoryRef = useRef<Record<string, TrajectoryEvent[]>>({});
+  const configRef = useRef<ConfigInfo | null>(null);
+  const didInitRef = useRef(false);
+  const toastTimerRef = useRef<number | null>(null);
 
-  const active = chats.find((c) => c.id === activeId) ?? null;
+  useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
 
-  const showToast = useCallback((text: string, kind: "err" | "info" = "err") => {
-    setNotice({ kind, text });
-    window.setTimeout(() => setNotice(null), 4000);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+
+  useEffect(() => {
+    activeRef.current = activeId;
+  }, [activeId]);
+
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PINNED_KEY, JSON.stringify(pinned));
+    } catch {
+      /* ignore */
+    }
+  }, [pinned]);
+
+  useEffect(() => {
+    if (activeId) writeStored(LAST_CHAT_KEY, activeId);
+  }, [activeId]);
+
+  useEffect(() => {
+    const active = chats.find((chat) => chat.id === activeId);
+    document.title = active
+      ? `${active.title || "新会话"} · AgentBox`
+      : "AgentBox · DeepSeek Harness";
+  }, [activeId, chats]);
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
   }, []);
 
-  /* ---- 初始化 ---- */
-  useEffect(() => {
-    void (async () => {
-      try {
-        const cfg = await api.config();
-        setConfig(cfg);
-        const list = await api.chats();
-        setChats(list);
-        if (list.length > 0) void selectChat(list[0].id);
-      } catch (e) {
-        setConnError(`无法连接后端:${e instanceof Error ? e.message : String(e)}`);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const showToast = useCallback(
+    (text: string, kind: "info" | "success" | "error" = "info") => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+      const id = Date.now();
+      setNotice({ id, kind, text });
+      toastTimerRef.current = window.setTimeout(() => {
+        setNotice(null);
+        toastTimerRef.current = null;
+      }, 3600);
+    },
+    [],
+  );
+
+  const updateSidebarCollapsed = useCallback((next: boolean) => {
+    setSidebarCollapsed(next);
+    writeStored(SIDEBAR_KEY, next ? "1" : "0");
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((previous) => {
+      const next = !previous;
+      writeStored(SIDEBAR_KEY, next ? "1" : "0");
+      return next;
+    });
   }, []);
 
   const selectChat = useCallback(
-    async (id: string) => {
-      if (runningRef.current) return;
-      setActiveId(id);
-      activeRef.current = id;
+    async (chatId: string) => {
+      if (runningRef.current && chatId !== activeRef.current) {
+        showToast("当前会话运行中,完成后才能切换", "error");
+        return;
+      }
+      if (chatId === activeRef.current) {
+        setView("chat");
+        setMobileOpen(false);
+        return;
+      }
+      setActiveId(chatId);
+      activeRef.current = chatId;
+      setView("chat");
+      setMobileOpen(false);
+      setTeam(null);
+      setFeedback({});
+      setStatus("");
+      setLoadingChat(true);
+      setEntries([]);
       setTurn(EMPTY_TURN);
-      const storedTrajectory = trajectoryRef.current[id] ?? loadTrajectory(id);
-      trajectoryRef.current[id] = storedTrajectory;
-      setTrajectory(storedTrajectory);
+      const stored = trajectoryRef.current[chatId] ?? loadTrajectory(chatId);
+      trajectoryRef.current[chatId] = stored;
+      setTrajectory(stored);
       try {
-        const data = await api.chat(id);
-        setEntries(data.transcript || []);
-        if (data.title) setChats((prev) => prev.map((c) => (c.id === id ? { ...c, title: data.title } : c)));
-        document.title = `${data.title || "新会话"} · AgentBox`;
-      } catch (e) {
-        showToast(`加载会话失败:${e instanceof Error ? e.message : String(e)}`);
+        const detail = await api.chat(chatId);
+        setEntries(detail.transcript || []);
+        if (detail.title) {
+          setChats((previous) =>
+            previous.map((chat) => (chat.id === chatId ? { ...chat, title: detail.title } : chat)),
+          );
+        }
+      } catch (error) {
+        showToast(`加载会话失败:${error instanceof Error ? error.message : String(error)}`, "error");
+      } finally {
+        setLoadingChat(false);
       }
     },
     [showToast],
   );
 
-  const createChat = useCallback(
-    async (firstText?: string, teamReq = false) => {
+  const loadAll = useCallback(async () => {
+    setConnError(null);
+    try {
+      const [configInfo, list] = await Promise.all([api.config(), api.chats()]);
+      setConfig(configInfo);
+      setChats(list);
+      const storedId = readStored(LAST_CHAT_KEY);
+      const target = list.find((chat) => chat.id === storedId) ?? list[0];
+      if (target) {
+        await selectChat(target.id);
+      } else {
+        setActiveId(null);
+        activeRef.current = null;
+        setEntries([]);
+        setTurn(EMPTY_TURN);
+        setTrajectory([]);
+        setView("chat");
+      }
+    } catch (error) {
+      setConnError(error instanceof Error ? error.message : String(error));
+    }
+  }, [selectChat]);
+
+  useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
+    void loadAll();
+  }, [loadAll]);
+
+  useEffect(() => {
+    if (!config?.approval?.enabled) return;
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const list = await api.approvals();
+        if (stopped) return;
+        setApprovals(
+          list.map((approval) => ({
+            ...approval,
+            timeoutSeconds: approval.timeoutSeconds ?? config.approval?.timeoutSeconds,
+          })),
+        );
+      } catch {
+        /* 轮询失败保持现有审批条 */
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [config?.approval?.enabled, config?.approval?.timeoutSeconds]);
+
+  const createChat = useCallback(async () => {
+    if (runningRef.current) {
+      showToast("当前还有任务在运行,请先停止或等待完成", "error");
+      return;
+    }
+    try {
       const chat = await api.createChat();
-      setChats((prev) => [{ ...chat, title: firstText ? firstText.slice(0, 18) : chat.title }, ...prev]);
+      setChats((previous) => [chat, ...previous]);
       setActiveId(chat.id);
       activeRef.current = chat.id;
       setEntries([]);
       setTurn(EMPTY_TURN);
-      trajectoryRef.current[chat.id] = [];
+      setTeam(null);
       setTrajectory([]);
-      void sendTurn(chat.id, firstText ?? "", teamReq); // eslint-disable-line @typescript-eslint/no-floating-promises
-    },
-    // sendTurn 在下方声明,使用函数提升不适用;存在前向依赖,这里以 ref 传递
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
+      trajectoryRef.current[chat.id] = [];
+      setView("chat");
+      setFeedback({});
+      setStatus("");
+      setMobileOpen(false);
+      setFocusSignal((value) => value + 1);
+    } catch (error) {
+      showToast(`新建会话失败:${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  }, [showToast]);
 
-  const removeChat = useCallback(
-    async (id: string) => {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const modifier = event.metaKey || event.ctrlKey;
+      if (modifier && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSettingsOpen(false);
+        setPaletteOpen((open) => !open);
+      } else if (modifier && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        if (!runningRef.current) void createChat();
+      } else if (modifier && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        toggleSidebar();
+      } else if (modifier && event.key === ",") {
+        event.preventDefault();
+        setPaletteOpen(false);
+        setSettingsOpen(true);
+      } else if (event.key === "Escape") {
+        setMobileOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [createChat, toggleSidebar]);
+
+  const renameChat = useCallback(
+    async (chatId: string, title: string) => {
       try {
-        await api.removeChat(id);
-        if (activeRef.current === id) {
-          setActiveId(null);
-          activeRef.current = null;
-          setEntries([]);
-          setTurn(EMPTY_TURN);
-          setTrajectory([]);
-        }
-        delete trajectoryRef.current[id];
-        try {
-          sessionStorage.removeItem(TRAJECTORY_KEY + id);
-        } catch {
-          /* ignore */
-        }
-        setChats((prev) => prev.filter((c) => c.id !== id));
-      } catch (e) {
-        showToast(e instanceof ApiError && e.status === 409 ? "会话正在运行,无法删除" : `删除失败:${e instanceof Error ? e.message : String(e)}`);
+        const updated = await api.renameChat(chatId, title);
+        setChats((previous) =>
+          previous.map((chat) => (chat.id === chatId ? { ...chat, title: updated.title } : chat)),
+        );
+      } catch (error) {
+        showToast(`重命名失败:${error instanceof Error ? error.message : String(error)}`, "error");
       }
     },
     [showToast],
   );
 
+  const performDeleteChat = useCallback(
+    async (chatId: string) => {
+      try {
+        await api.removeChat(chatId);
+        const remaining = chatsRef.current.filter((chat) => chat.id !== chatId);
+        setChats(remaining);
+        delete trajectoryRef.current[chatId];
+        try {
+          sessionStorage.removeItem(TRAJECTORY_KEY + chatId);
+        } catch {
+          /* ignore */
+        }
+        setPinned((previous) => previous.filter((id) => id !== chatId));
+        if (activeRef.current === chatId) {
+          activeRef.current = null;
+          setActiveId(null);
+          setEntries([]);
+          setTurn(EMPTY_TURN);
+          setTeam(null);
+          setTrajectory([]);
+          setView("chat");
+          const next = remaining[0];
+          if (next) void selectChat(next.id);
+        }
+        showToast("会话已删除", "success");
+      } catch (error) {
+        showToast(
+          error instanceof ApiError && error.status === 409
+            ? "会话正在运行,无法删除"
+            : `删除失败:${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      } finally {
+        setConfirm(null);
+      }
+    },
+    [selectChat, showToast],
+  );
+
+  const requestDeleteChat = useCallback(
+    (chatId: string) => {
+      if (runningRef.current && chatId === activeRef.current) {
+        showToast("会话正在运行,无法删除", "error");
+        return;
+      }
+      const chat = chatsRef.current.find((item) => item.id === chatId);
+      setConfirm({
+        kind: "delete",
+        chatId,
+        title: "删除会话",
+        message: `确定删除「${chat?.title || "新会话"}」吗?此操作不可撤销。`,
+        confirmLabel: "删除",
+        danger: true,
+      });
+    },
+    [showToast],
+  );
+
+  const performStopAll = useCallback(async () => {
+    setConfirm(null);
+    setStatus("正在停止全部任务…");
+    try {
+      const result = await api.stopAll();
+      setApprovals([]);
+      showToast(result.message || "全部任务已停止", "success");
+    } catch (error) {
+      setStatus("");
+      showToast(`停止失败:${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  }, [showToast]);
+
+  const requestStopAll = useCallback(() => {
+    if (!runningRef.current && approvals.length === 0) {
+      showToast("当前没有运行中的任务");
+      return;
+    }
+    setConfirm({
+      kind: "stop",
+      title: "停止全部任务",
+      message: "会硬中断共享 runtime,所有正在运行的会话会收到停止事件。下一条消息会自动重启。",
+      confirmLabel: "停止全部",
+      danger: true,
+    });
+  }, [approvals.length, showToast]);
+
   const sendTurn = useCallback(
-    async (chatId: string, text: string, teamReq: boolean) => {
+    async (chatId: string, text: string, teamRequested: boolean) => {
       if (runningRef.current) {
         showToast("上一条还在处理中");
         return;
       }
-      const chat = chats.find((c) => c.id === chatId);
-      // 新建会话后立刻发首条消息时,chats 闭包里还没有这个 chat;
-      // 不能因此直接 return,否则会创建会话但消息永远不发送。
-      if (chat && (chat.title === "新会话" || !chat.title)) {
-        setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, title: text.slice(0, 18) } : c)));
+      const chat = chatsRef.current.find((item) => item.id === chatId);
+      if (chat && (!chat.title || chat.title === "新会话")) {
+        setChats((previous) =>
+          previous.map((item) =>
+            item.id === chatId ? { ...item, title: text.slice(0, 18) } : item,
+          ),
+        );
       }
 
       runningRef.current = true;
       setRunning(true);
-      setStatus("Agent 启动中…");
-      if (teamReq) {
+      setView("chat");
+      setStatus(teamRequested ? "团队工作流启动中…" : "Agent 启动中…");
+      setTurn({ blocks: [], children: [], meta: { startedAt: Date.now() } });
+      if (teamRequested) {
         setTeam({ stages: {}, timeline: [] });
-        setDockTab("team");
-        setDockOpen(true);
       }
+      setFeedback({});
+      setNow(Date.now());
 
       let titleSeen = false;
-      const record = (ev: TurnEvent) => {
-        if (TRAJECTORY_SKIP.has(ev.type)) return;
-        const entry: TrajectoryEvent = { ...ev, ts: Date.now() };
+      let failed = false;
+      let failureText = "";
+
+      const record = (event: TurnEvent) => {
+        if (TRAJECTORY_SKIP.has(event.type)) return;
+        const entry: TrajectoryEvent = { ...event, ts: Date.now() };
         const current = trajectoryRef.current[chatId] ?? [];
         const next = [...current, entry].slice(-TRAJECTORY_LIMIT);
         trajectoryRef.current[chatId] = next;
         saveTrajectory(chatId, next);
         if (activeRef.current === chatId) setTrajectory(next);
       };
-      const apply = (ev: TurnEvent) => {
-        record(ev);
-        if (ev.type === "chat_title" && ev.title && !titleSeen) {
+
+      const apply = (event: TurnEvent) => {
+        record(event);
+        if (event.type === "chat_title" && event.title && !titleSeen) {
           titleSeen = true;
-          setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, title: ev.title! } : c)));
-          document.title = `${ev.title} · AgentBox`;
+          setChats((previous) =>
+            previous.map((item) => (item.id === chatId ? { ...item, title: event.title! } : item)),
+          );
         }
-        if (ev.type === "approval_request" && ev.approvalId) {
-          setApprovals((prev) => [
-            ...prev.filter((approval) => approval.id !== ev.approvalId),
+        if (event.type === "approval_request" && event.approvalId) {
+          setApprovals((previous) => [
+            ...previous.filter((approval) => approval.id !== event.approvalId),
             {
-              id: ev.approvalId!,
-              chatId: ev.chatId,
-              toolName: ev.toolName || "tool",
-              callId: ev.callId,
-              reason: ev.reason,
-              timeoutSeconds: ev.timeoutSeconds,
+              id: event.approvalId!,
+              chatId: event.chatId ?? chatId,
+              toolName: event.toolName || "tool",
+              callId: event.callId,
+              reason: event.reason,
+              timeoutSeconds: event.timeoutSeconds,
             },
           ]);
-          setStatus("⏸ 等待人工审批…");
+          setStatus("等待人工审批…");
           return;
         }
-        if (ev.type === "approval_resolved" && ev.approvalId) {
-          setApprovals((prev) => prev.filter((approval) => approval.id !== ev.approvalId));
+        if (event.type === "approval_resolved" && event.approvalId) {
+          setApprovals((previous) =>
+            previous.filter((approval) => approval.id !== event.approvalId),
+          );
           if (runningRef.current) setStatus("审批已处理,继续执行…");
           return;
         }
-        if (ev.type === "end") {
-          setApprovals((prev) => prev.filter((approval) => approval.chatId !== chatId));
+        if (event.type === "end") {
+          setApprovals((previous) => previous.filter((approval) => approval.chatId !== chatId));
         }
-        setTurn((prev) =>
-          reduceTurn(prev, ev, {
+        if (event.type === "error") {
+          failed = true;
+          failureText = event.message || "模型请求失败";
+        }
+        setTurn((previous) =>
+          reduceTurn(previous, event, {
             setStatus,
             onTeamPanel: setTeam,
-            openDock: () => setDockOpen(true),
-            agents: config?.workflow?.agents ?? [],
+            agents: configRef.current?.workflow?.agents ?? [],
           }),
         );
       };
 
       try {
-        await streamTurn(chatId, text, teamReq, apply);
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 409) showToast("上一条消息还在处理中");
-        else setTurn((prev) => ({ ...prev, blocks: [...prev.blocks, { kind: "error", text: e instanceof Error ? e.message : String(e) }] }));
+        await streamTurn(chatId, text, teamRequested, apply);
+      } catch (error) {
+        failed = true;
+        failureText = error instanceof Error ? error.message : String(error);
+        if (error instanceof ApiError && error.status === 409) {
+          showToast("上一条消息还在处理中", "error");
+        } else {
+          showToast(`请求失败:${failureText}`, "error");
+        }
       } finally {
         runningRef.current = false;
         setRunning(false);
         setStatus("");
-        setApprovals((prev) => prev.filter((approval) => approval.chatId !== chatId));
+        setApprovals((previous) => previous.filter((approval) => approval.chatId !== chatId));
         try {
           const list = await api.chats();
           setChats(list);
           if (activeRef.current === chatId) {
             const fresh = await api.chat(chatId);
-            setEntries(fresh.transcript || []);
+            const nextEntries = fresh.transcript || [];
+            const alreadyNoted =
+              failureText.length > 0 &&
+              nextEntries.some(
+                (entry) => entry.role === "system" && entry.text.includes(failureText),
+              );
+            setEntries(
+              failed && !alreadyNoted
+                ? [...nextEntries, { role: "system", text: `⚠️ ${failureText}`, ts: Date.now() }]
+                : nextEntries,
+            );
             setTurn(EMPTY_TURN);
           }
         } catch {
-          /* 刷新失败不影响主流程,静默即可 */
+          /* 刷新失败不影响主流程 */
         }
-      }
-    },
-    [chats, config, showToast],
-  );
-
-  const handleSend = useCallback(
-    (text: string, teamReq: boolean) => {
-      if (activeId) void sendTurn(activeId, text, teamReq);
-      else void createChat(text, teamReq);
-    },
-    [activeId, createChat, sendTurn],
-  );
-
-  const handleCreate = useCallback(() => {
-    if (runningRef.current) return;
-    void createChat();
-  }, [createChat]);
-
-  const toggleDock = useCallback(
-    (tab: "team" | "trajectory") => {
-      setDockTab(tab);
-      setDockOpen((open) => (dockTab === tab ? !open : true));
-    },
-    [dockTab],
-  );
-
-  const stopAll = useCallback(async () => {
-    setStatus("正在停止全部任务…");
-    try {
-      const res = await api.stopAll();
-      setApprovals([]);
-      showToast(res.message || "全部任务已停止");
-    } catch (e) {
-      setStatus("");
-      showToast(`停止失败:${e instanceof Error ? e.message : String(e)}`);
-    }
-  }, [showToast]);
-
-  const decideApproval = useCallback(
-    async (approvalId: string, decision: "approve" | "reject") => {
-      try {
-        const res = await api.resolveApproval(approvalId, decision);
-        setApprovals((prev) => prev.filter((approval) => approval.id !== approvalId));
-        showToast(
-          res.outcome === "allowed-once" ? "已批准本次工具调用" : "已拒绝本次工具调用",
-          "info",
-        );
-      } catch (e) {
-        showToast(`审批提交失败:${e instanceof Error ? e.message : String(e)}`);
       }
     },
     [showToast],
   );
 
-  const runningChatId = running && activeId ? activeId : null;
+  const handleSend = useCallback(
+    async (text: string, teamRequested: boolean) => {
+      if (runningRef.current) {
+        showToast("上一条还在处理中");
+        return;
+      }
+      let chatId = activeRef.current;
+      if (!chatId) {
+        try {
+          const chat = await api.createChat();
+          chatId = chat.id;
+          setChats((previous) => [chat, ...previous]);
+          setActiveId(chat.id);
+          activeRef.current = chat.id;
+          setEntries([]);
+          setTurn(EMPTY_TURN);
+          setTeam(null);
+          setView("chat");
+        } catch (error) {
+          showToast(`新建会话失败:${error instanceof Error ? error.message : String(error)}`, "error");
+          return;
+        }
+      }
+      await sendTurn(chatId, text, teamRequested);
+    },
+    [sendTurn, showToast],
+  );
+
+  const decideApproval = useCallback(
+    async (approvalId: string, decision: "approve" | "reject") => {
+      try {
+        const result = await api.resolveApproval(approvalId, decision);
+        setApprovals((previous) => previous.filter((approval) => approval.id !== approvalId));
+        if (result.outcome === "allowed-once") {
+          showToast("已批准本次工具调用", "success");
+        } else if (result.outcome === "rejected") {
+          showToast("已拒绝本次工具调用", "success");
+        } else {
+          showToast(`审批未生效:${result.outcome}`, "error");
+        }
+      } catch (error) {
+        showToast(`审批提交失败:${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    },
+    [showToast],
+  );
+
+  const exportChat = useCallback(
+    async (chatId: string | null) => {
+      if (!chatId) {
+        showToast("当前没有可导出的会话");
+        return;
+      }
+      try {
+        let transcript = activeRef.current === chatId ? entries : [];
+        let title = chatsRef.current.find((chat) => chat.id === chatId)?.title || "会话";
+        if (transcript.length === 0) {
+          const detail = await api.chat(chatId);
+          transcript = detail.transcript || [];
+          title = detail.title || title;
+        }
+        if (transcript.length === 0) {
+          showToast("会话还没有内容");
+          return;
+        }
+        const lines = [
+          `# ${title}`,
+          "",
+          `> 工作区:${configRef.current?.workspace || ""}`,
+          `> 模型:${configRef.current?.model || ""}`,
+          `> 导出时间:${formatDateTime(Date.now())}`,
+          "",
+        ];
+        for (const entry of transcript) {
+          if (entry.role === "user") {
+            lines.push("## 你", "", entry.text, "");
+          } else if (entry.role === "assistant") {
+            const agent = agentView(configRef.current?.workflow?.agents ?? [], entry.agent);
+            lines.push(`## ${entry.agent ? agent.name : "Agent"}`, "", entry.text, "");
+          } else {
+            lines.push(`> ${entry.text}`, "");
+          }
+        }
+        downloadText(`${safeFilename(title)}.md`, lines.join("\n"));
+        showToast("会话已导出", "success");
+      } catch (error) {
+        showToast(`导出失败:${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    },
+    [entries, showToast],
+  );
+
+  const togglePin = useCallback((chatId: string) => {
+    setPinned((previous) =>
+      previous.includes(chatId)
+        ? previous.filter((id) => id !== chatId)
+        : [...previous, chatId],
+    );
+  }, []);
+
+  const onFeedback = useCallback((key: string, value: FeedbackValue | undefined) => {
+    setFeedback((previous) => {
+      const next = { ...previous };
+      if (value) next[key] = value;
+      else delete next[key];
+      return next;
+    });
+  }, []);
+
+  const openSettings = useCallback(() => {
+    setPaletteOpen(false);
+    setSettingsOpen(true);
+  }, []);
+
+  const openPalette = useCallback(() => {
+    setSettingsOpen(false);
+    setPaletteOpen(true);
+  }, []);
+
+  const openApprovals = useCallback(() => {
+    setView("chat");
+    const pending = approvals[0];
+    if (pending?.chatId && pending.chatId !== activeRef.current) {
+      if (runningRef.current) showToast("当前会话运行中,审批条会在完成前保持可见");
+      else void selectChat(pending.chatId);
+    }
+  }, [approvals, selectChat, showToast]);
+
+  const startTeamFromView = useCallback(() => {
+    setTeamMode(true);
+    setView("chat");
+    setFocusSignal((value) => value + 1);
+    showToast("已切换到团队工作流,描述任务后发送");
+  }, [showToast]);
+
+  const messageBlock = [...turn.blocks]
+    .reverse()
+    .find((block): block is Extract<Block, { kind: "message" }> => block.kind === "message" && Boolean(block.text));
+  const latestAnswer =
+    messageBlock?.text ||
+    [...entries].reverse().find((entry) => entry.role === "assistant" && entry.text)?.text ||
+    "";
+
+  const active = chats.find((chat) => chat.id === activeId) ?? null;
+  const hasContent =
+    entries.length > 0 ||
+    turn.blocks.length > 0 ||
+    turn.children.length > 0 ||
+    (active?.messageCount ?? 0) > 0;
+  const isEmpty = view === "chat" && !running && !hasContent;
+  const hasChat = Boolean(active);
+  const standalone = view !== "chat" && !hasChat;
+  const elapsedMs = turn.meta?.startedAt
+    ? (turn.meta.endedAt ?? now) - turn.meta.startedAt
+    : 0;
+  const headerTitle =
+    view === "chat"
+      ? active?.title || "新会话"
+      : active
+        ? active.title || "新会话"
+        : view === "team"
+          ? "团队工作流"
+          : "运行轨迹";
+
+  if (!config && !connError) {
+    return (
+      <div className="boot-screen">
+        <BrandLockup size={32} />
+        <span className="boot-spinner" />
+        <p>正在加载工作台…</p>
+      </div>
+    );
+  }
+
+  if (!config && connError) {
+    return (
+      <div className="fatal-screen">
+        <BrandLockup size={32} />
+        <div className="fatal-card">
+          <span className="fatal-icon"><IconAlert size={22} /></span>
+          <h1>无法连接后端</h1>
+          <p>{connError}</p>
+          <button type="button" className="primary-btn" onClick={() => void loadAll()}>
+            <IconRefresh size={15} />
+            重试
+          </button>
+          <p className="fatal-hint">确认 uvicorn 正在 127.0.0.1:8765 运行</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className={`shell${dockOpen ? "" : " dock-hidden"}`}>
-      <Rail
+    <div className={cx("app-shell", sidebarCollapsed && "is-sidebar-collapsed")}>
+      {mobileOpen && <div className="sidebar-backdrop" onClick={() => setMobileOpen(false)} />}
+      <Sidebar
         chats={chats}
-        runningChatId={runningChatId}
         activeId={activeId}
+        runningChatId={running ? activeId : null}
         config={config}
-        disabled={running}
-        onSelect={(id) => void selectChat(id)}
-        onCreate={handleCreate}
-        onDelete={(id) => void removeChat(id)}
+        collapsed={sidebarCollapsed}
+        mobileOpen={mobileOpen}
+        approvalsCount={approvals.length}
+        pinned={pinned}
+        running={running}
         theme={theme}
-        onToggleTheme={toggle}
+        onSelectChat={(id) => void selectChat(id)}
+        onCreateChat={() => void createChat()}
+        onDeleteChat={requestDeleteChat}
+        onRenameChat={(id, title) => void renameChat(id, title)}
+        onTogglePin={togglePin}
+        onToggleCollapsed={toggleSidebar}
+        onCloseMobile={() => setMobileOpen(false)}
+        onOpenSettings={openSettings}
+        onOpenTeam={() => {
+          setView("team");
+          setMobileOpen(false);
+        }}
+        onOpenTrajectory={() => {
+          setView("trajectory");
+          setMobileOpen(false);
+        }}
+        onOpenApprovals={openApprovals}
+        onOpenPalette={openPalette}
+        onExportChat={(id) => void exportChat(id)}
+        onToggleTheme={toggleTheme}
+        onStopAll={requestStopAll}
       />
-      <main className="main">
-        <TopBar
-          chat={active}
-          status={status}
+
+      <main className={cx("main", isEmpty && "is-empty")}>
+        <MainHeader
+          title={headerTitle}
+          empty={isEmpty}
+          standalone={standalone}
+          hasChat={hasChat}
+          view={view}
           running={running}
-          streaming={config?.streaming}
-          dockOpen={dockOpen}
-          dockTab={dockTab}
-          onToggleDock={toggleDock}
-          onStopAll={() => void stopAll()}
+          status={status}
+          elapsedLabel={elapsedMs > 0 ? formatDurationShort(elapsedMs) : ""}
+          connected={Boolean(config) && !connError}
+          mock={Boolean(config?.mock)}
+          teamCount={config?.workflow?.agents.length ?? 0}
+          approvalsCount={approvals.length}
           theme={theme}
-          onToggleTheme={toggle}
+          onChangeView={setView}
+          onOpenSidebar={() => setMobileOpen(true)}
+          onNewChat={() => void createChat()}
+          onStopAll={requestStopAll}
+          onOpenSettings={openSettings}
+          onOpenPalette={openPalette}
+          onOpenApprovals={openApprovals}
+          onExport={() => void exportChat(activeId)}
+          onDelete={() => {
+            if (activeId) requestDeleteChat(activeId);
+          }}
+          onToggleTheme={toggleTheme}
+          onBack={() => setView("chat")}
         />
-        {connError && <div className="err-box" style={{ margin: "10px 18px" }}>{connError}</div>}
-        {config?.mock && (
-          <div className="chip-row" style={{ margin: "10px 18px 0" }}>
-            <span className="chip chip-mock">
-              <span className="dot" />Mock 模式:.env 里 DEEPSEEK_API_KEY 还是占位符,本地剧本回放中
+
+        {config?.mock && !mockDismissed && (
+          <div className="mock-banner">
+            <span className="mock-banner-icon"><IconSparkles size={15} /></span>
+            <span>
+              Mock 模式:未检测到有效 API Key,当前使用本地剧本回放。
             </span>
-            {config.startupError && <span className="chip">{config.startupError}</span>}
+            <button type="button" className="mock-banner-link" onClick={openSettings}>
+              查看配置
+            </button>
+            <button
+              type="button"
+              className="mock-banner-close"
+              onClick={() => setMockDismissed(true)}
+              aria-label="关闭提示"
+            >
+              <IconX size={13} />
+            </button>
           </div>
         )}
-        <Flow
-          entries={entries}
-          blocks={turn.blocks}
-          childGroups={turn.children}
-          agents={config?.workflow?.agents ?? []}
-          running={running}
-          emptyHint={
-            config?.mock
-              ? "服务运行在 Mock 模式,发送一条消息体验交互流程。"
-              : active
-                ? "给 agent 布置一个任务;团队工作流随时待命。"
-                : "先在左侧新建一个会话,或点击＋开始。"
-          }
-        />
-        <ApprovalBar approvals={approvals} onDecide={(id, decision) => void decideApproval(id, decision)} />
-        <Composer
-          disabled={!activeId && !connError && !config}
-          running={running}
-          onSubmit={handleSend}
-          team={team}
-          workflow={config?.workflow ?? null}
-        />
+
+        {approvals.length > 0 && (
+          <ApprovalBar approvals={approvals} onDecide={(id, decision) => void decideApproval(id, decision)} />
+        )}
+
+        {view === "chat" ? (
+          isEmpty ? (
+            <div className="empty-layout">
+              <Welcome mock={Boolean(config?.mock)} />
+              <Composer
+                variant="hero"
+                disabled={!config}
+                running={running}
+                team={teamMode}
+                workflow={config?.workflow ?? null}
+                model={config?.model || "—"}
+                provider={config?.provider || "—"}
+                streaming={config?.streaming}
+                mock={Boolean(config?.mock)}
+                workspace={config?.workspace || ""}
+                onSubmit={(text, teamRequested) => void handleSend(text, teamRequested)}
+                onTeamChange={setTeamMode}
+                onStop={requestStopAll}
+                onOpenSettings={openSettings}
+                onNewChat={() => void createChat()}
+                onExport={() => void exportChat(activeId)}
+                focusSignal={focusSignal}
+              />
+            </div>
+          ) : (
+            <>
+              {loadingChat && entries.length === 0 ? (
+                <div className="chat-loading">
+                  <span className="boot-spinner is-small" />
+                  <span>正在加载会话…</span>
+                </div>
+              ) : (
+                <Conversation
+                  entries={entries}
+                  blocks={turn.blocks}
+                  childGroups={turn.children}
+                  agents={config?.workflow?.agents ?? []}
+                  running={running}
+                  status={status}
+                  meta={turn.meta}
+                  elapsedMs={elapsedMs}
+                  feedback={feedback}
+                  onFeedback={onFeedback}
+                  onNotify={showToast}
+                  onExport={() => void exportChat(activeId)}
+                />
+              )}
+              <Composer
+                variant="dock"
+                disabled={!config}
+                running={running}
+                team={teamMode}
+                workflow={config?.workflow ?? null}
+                model={config?.model || "—"}
+                provider={config?.provider || "—"}
+                streaming={config?.streaming}
+                mock={Boolean(config?.mock)}
+                workspace={config?.workspace || ""}
+                onSubmit={(text, teamRequested) => void handleSend(text, teamRequested)}
+                onTeamChange={setTeamMode}
+                onStop={requestStopAll}
+                onOpenSettings={openSettings}
+                onNewChat={() => void createChat()}
+                onExport={() => void exportChat(activeId)}
+                focusSignal={focusSignal}
+              />
+            </>
+          )
+        ) : view === "team" ? (
+          <TeamView
+            data={team}
+            workflow={config?.workflow ?? null}
+            running={running}
+            answer={latestAnswer}
+            onStartTeam={startTeamFromView}
+          />
+        ) : (
+          <TrajectoryView
+            events={trajectory}
+            agents={config?.workflow?.agents ?? []}
+            running={running}
+          />
+        )}
       </main>
-      {dockTab === "team" ? (
-        <TeamDock open={dockOpen} data={team} agents={config?.workflow?.agents ?? []} />
-      ) : (
-        <TrajectoryDock
-          open={dockOpen}
-          events={trajectory}
-          agents={config?.workflow?.agents ?? []}
-        />
-      )}
-      {notice && <div className="toast">{notice.text}</div>}
+
+      <SettingsDialog
+        open={settingsOpen}
+        config={config}
+        themeMode={themeMode}
+        sidebarCollapsed={sidebarCollapsed}
+        running={running}
+        onClose={() => setSettingsOpen(false)}
+        onThemeMode={setThemeMode}
+        onSidebarCollapsed={updateSidebarCollapsed}
+        onStopAll={requestStopAll}
+        onNotify={showToast}
+      />
+
+      <CommandPalette
+        open={paletteOpen}
+        running={running}
+        hasChat={hasChat}
+        theme={theme}
+        onClose={() => setPaletteOpen(false)}
+        onNewChat={() => void createChat()}
+        onOpenSettings={openSettings}
+        onToggleTheme={toggleTheme}
+        onOpenChat={() => setView("chat")}
+        onOpenTeam={() => setView("team")}
+        onOpenTrajectory={() => setView("trajectory")}
+        onStopAll={requestStopAll}
+        onExport={() => void exportChat(activeId)}
+        onToggleSidebar={toggleSidebar}
+      />
+
+      <ConfirmDialog
+        open={Boolean(confirm)}
+        title={confirm?.title ?? ""}
+        message={confirm?.message ?? ""}
+        confirmLabel={confirm?.confirmLabel}
+        danger={confirm?.danger}
+        onCancel={() => setConfirm(null)}
+        onConfirm={() => {
+          if (!confirm) return;
+          if (confirm.kind === "delete" && confirm.chatId) {
+            void performDeleteChat(confirm.chatId);
+          } else {
+            void performStopAll();
+          }
+        }}
+      />
+
+      <Toast toast={notice} onClose={() => setNotice(null)} />
     </div>
   );
 }

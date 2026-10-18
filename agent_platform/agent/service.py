@@ -381,6 +381,15 @@ class AgentService:
         payload["transcript"] = list(chat.transcript)
         return payload
 
+    def rename_chat(self, chat_id: str, title: str) -> dict[str, Any]:
+        """重命名会话;标题只在非空时覆盖,供侧边栏 inline rename 使用。"""
+        chat = self.get_chat(chat_id)
+        cleaned = str(title or "").strip()[:120]
+        if not cleaned:
+            raise ValueError("title 不能为空")
+        chat.title = cleaned
+        return chat.summary()
+
     def delete_chat(self, chat_id: str) -> None:
         chat = self.get_chat(chat_id)
         if not chat.lock.acquire(blocking=False):

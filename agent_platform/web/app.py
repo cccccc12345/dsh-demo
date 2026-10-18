@@ -41,6 +41,10 @@ class MessageIn(BaseModel):
     text: str
 
 
+class ChatTitleIn(BaseModel):
+    title: str
+
+
 class ApprovalDecisionIn(BaseModel):
     decision: str
 
@@ -105,6 +109,18 @@ def api_get_chat(chat_id: str, service: ServiceDep) -> dict[str, Any]:
         return service.get_chat_detail(chat_id)
     except ChatNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.patch("/api/chats/{chat_id}")
+def api_rename_chat(
+    chat_id: str, body: ChatTitleIn, service: ServiceDep
+) -> dict[str, Any]:
+    try:
+        return service.rename_chat(chat_id, body.title)
+    except ChatNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.delete("/api/chats/{chat_id}")

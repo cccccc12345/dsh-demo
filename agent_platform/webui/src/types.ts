@@ -1,5 +1,25 @@
 /** 与 agent_platform/web 的 API 契约一一对应 */
 
+export type ViewTab = "chat" | "team" | "trajectory";
+export type FeedbackValue = "up" | "down";
+
+export interface UsageInfo {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cacheReadTokens?: number;
+  reasoningTokens?: number;
+}
+
+/** 当前这一轮流式 turn 的计时与用量(仅本会话内存态)。 */
+export interface TurnMeta {
+  startedAt?: number;
+  endedAt?: number;
+  usage?: UsageInfo;
+  finishReason?: string;
+  failed?: boolean;
+}
+
 export interface AgentSpecInfo {
   id: string;
   name: string;
@@ -137,6 +157,7 @@ export interface PendingApproval {
   callId?: string;
   reason?: string;
   timeoutSeconds?: number;
+  createdAt?: number;
 }
 
 /** Agent 角色标签(由 workflow.agents 动态决定) */

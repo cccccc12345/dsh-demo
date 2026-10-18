@@ -55,6 +55,14 @@ class AgentServiceTest(unittest.TestCase):
         with self.assertRaises(ChatNotFound):
             self.service.get_chat("chat-missing")
 
+    def test_rename_chat_trims_title_and_rejects_empty(self) -> None:
+        chat = self.service.create_chat("旧标题")
+        renamed = self.service.rename_chat(chat["id"], "  新标题  ")
+        self.assertEqual(renamed["title"], "新标题")
+        self.assertEqual(self.service.get_chat(chat["id"]).title, "新标题")
+        with self.assertRaises(ValueError):
+            self.service.rename_chat(chat["id"], "   ")
+
 
 if __name__ == "__main__":
     unittest.main()
