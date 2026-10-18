@@ -2,7 +2,7 @@
 
 基于 `deepseek-harness` SDK 的一个最小可用的 Agent Web 平台:多会话聊天界面 + SSE 流式事件推送(工具调用、推理、最终回复)。
 
-**深入阅读:** [配置与原理](docs/configuration-and-internals.md) — skill、MCP、流式、workflow、停止、轨迹的实现细节；[自定义工具](docs/custom-tools.md) — function calling、原生工具插件、MCP 与 demo；[人工审批](docs/human-in-the-loop.md) — HITL 审批桥、浏览器审批条与 `guarded_echo` demo。
+**深入阅读:** [配置与原理](docs/configuration-and-internals.md) — skill、MCP、流式、workflow、停止、轨迹的实现细节；[前端实现](docs/frontend-implementation.md) — 仿官方 DSH Web 的布局、组件、SSE 归约与主题；[自定义工具](docs/custom-tools.md) — function calling、原生工具插件、MCP 与 demo；[人工审批](docs/human-in-the-loop.md) — HITL 审批桥、浏览器审批条与 `guarded_echo` demo。
 
 ## 结构
 
@@ -36,9 +36,10 @@ agent_platform/
 仓库根目录还包含:
 
 ```text
-docs/custom-tools.md          # 自定义工具技术文档
-docs/human-in-the-loop.md     # 人工审批(HITL)技术文档
-demos/custom_tool_demo.py     # text_stats / guarded_echo 端到端 demo
+docs/frontend-implementation.md # 仿官方 DSH Web 的前端实现文档
+docs/custom-tools.md            # 自定义工具技术文档
+docs/human-in-the-loop.md       # 人工审批(HITL)技术文档
+demos/custom_tool_demo.py       # text_stats / guarded_echo 端到端 demo
 ```
 
 依赖方向是单向的:`web → agent`。`agent/` 不导入 FastAPI/Starlette,可以脱离 Web
